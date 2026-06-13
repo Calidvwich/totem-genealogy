@@ -1,0 +1,49 @@
+# Python cache and local environments
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# FastAPI / local server artifacts
+*.log
+logfile
+*.pid
+uvicorn.pid
+
+# Generated data and database exports
+members_load.csv
+genealogies_load.csv
+marriages_load.csv
+*_load.csv
+exports/
+backups/
+*_bck.sql
+*.dump
+*.backup
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+_tmp_*.py
+tmp/
+temp/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Keep the default resource image tracked
+!resources/
+!resources/defaultpic.jpg
