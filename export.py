@@ -1,0 +1,251 @@
+import argparse
+import csv
+import json
+import os
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+
+APP_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = APP_DIR / "output"
+EXPORT_DIR = OUTPUT_DIR / "export"
+DATABASE = os.getenv("TOTEM_DATABASE", "genealogy")
+TSQL = os.getenv("TOTEM_TSQL", "/usr/local/totem/bin/tsql")
+TOTEM_PORT = os.getenv("TOTEM_PORT", "")
+TOTEM_USER = os.getenv("TOTEM_USER", "totem")
+
+
+def sql_literal(value):
+    if value is None or value == "":
+        return "NULL"
+    if isinstance(value, int):
+        return str(value)
+    return "'{}'".format(str(value).replace("'", "''"))
+
+
+def run_tsql(args, timeout=300):
+    command = [TSQL]
+    if TOTEM_PORT:
+        command.extend(["-p", TOTEM_PORT])
+    if TOTEM_USER:
+        command.extend(["-U", TOTEM_USER])
+    command.extend(["-d", DATABASE])
+    command.extend(args)
+    completed = subprocess.run(
+        command,
+        cwd=str(APP_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        check=False,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
+    return completed.stdout
+
+
+def copy_to(query, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output = run_tsql(["-A", "-F", "\t", "-c", query])
+    lines = [line for line in output.splitlines() if line and not line.startswith("(")]
+    if not lines:
+        output_path.write_text("", encoding="utf-8", newline="")
+        return
+    reader = csv.reader(lines, delimiter="\t")
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerows(reader)
+
+
+def query_rows(query):
+    output = run_tsql(["-A", "-F", "\t", "-c", query])
+    lines = [line for line in output.splitlines() if line and not line.startswith("(")]
+    if not lines:
+        return [], []
+    reader = csv.DictReader(lines, delimiter="\t")
+    return reader.fieldnames or [], list(reader)
+
+
+def write_dict_rows(path, headers, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def export_member_ancestors(member_id, path):
+    headers = ["member_id", "name", "gender", "birth_year", "death_year", "father_id", "mother_id", "generation_num", "depth"]
+    result = []
+    queue = [(int(member_id), 0)]
+    seen = {int(member_id)}
+    while queue:
+        current_id, depth = queue.pop(0)
+        _, rows = query_rows(
+            "SELECT member_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num "
+            "FROM members WHERE member_id = {}".format(current_id)
+        )
+        if not rows:
+            continue
+        row = rows[0]
+        if depth > 0:
+            item = {key: row.get(key, "") for key in headers}
+            item["depth"] = depth
+            result.append(item)
+        for key in ("father_id", "mother_id"):
+            parent = row.get(key)
+            if parent and parent != "NULL":
+                parent_id = int(parent)
+                if parent_id not in seen:
+                    seen.add(parent_id)
+                    queue.append((parent_id, depth + 1))
+    write_dict_rows(path, headers, result)
+
+
+def timestamp():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def export_database(output_dir=None):
+    target = Path(output_dir) if output_dir else EXPORT_DIR / ("database_" + timestamp())
+    target.mkdir(parents=True, exist_ok=True)
+    copy_to("SELECT * FROM users ORDER BY id", target / "users.csv")
+    copy_to("SELECT * FROM genealogies ORDER BY clan_id", target / "genealogies.csv")
+    copy_to("SELECT * FROM collaborations ORDER BY clan_id,user_id", target / "collaborations.csv")
+    copy_to("SELECT * FROM members ORDER BY clan_id,generation_num,member_id", target / "members.csv")
+    copy_to("SELECT * FROM marriages ORDER BY clan_id,marriage_id", target / "marriages.csv")
+    try:
+        copy_to("SELECT * FROM member_photos ORDER BY photo_sha256", target / "member_photos.csv")
+        files = ["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv", "member_photos.csv"]
+    except Exception:
+        files = ["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv"]
+    manifest = {
+        "type": "database",
+        "database": DATABASE,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "files": files,
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "type": "database", "output_dir": str(target)}
+
+
+def export_clans(clan_ids, output_dir=None):
+    ids = [int(item) for item in clan_ids if str(item).strip()]
+    if not ids:
+        raise ValueError("至少需要选择一个族谱")
+    id_list = ",".join(str(item) for item in sorted(set(ids)))
+    target = Path(output_dir) if output_dir else EXPORT_DIR / ("clans_" + timestamp())
+    target.mkdir(parents=True, exist_ok=True)
+    copy_to("SELECT * FROM genealogies WHERE clan_id IN ({}) ORDER BY clan_id".format(id_list), target / "genealogies.csv")
+    copy_to("SELECT * FROM collaborations WHERE clan_id IN ({}) ORDER BY clan_id,user_id".format(id_list), target / "collaborations.csv")
+    copy_to("SELECT * FROM members WHERE clan_id IN ({}) ORDER BY clan_id,generation_num,member_id".format(id_list), target / "members.csv")
+    copy_to("SELECT * FROM marriages WHERE clan_id IN ({}) ORDER BY clan_id,marriage_id".format(id_list), target / "marriages.csv")
+    files = ["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv"]
+    try:
+        copy_to(
+            "SELECT p.* FROM member_photos p JOIN members m ON m.id_pic = p.photo_sha256 "
+            "WHERE m.clan_id IN ({}) ORDER BY p.photo_sha256".format(id_list),
+            target / "member_photos.csv",
+        )
+        files.append("member_photos.csv")
+    except Exception:
+        pass
+    copy_to(
+        "SELECT DISTINCT u.* FROM users u "
+        "JOIN ("
+        "SELECT creator_id AS user_id FROM genealogies WHERE clan_id IN ({ids}) "
+        "UNION SELECT user_id FROM collaborations WHERE clan_id IN ({ids})"
+        ") r ON r.user_id = u.id ORDER BY u.id".format(ids=id_list),
+        target / "users.csv",
+    )
+    manifest = {
+        "type": "clans",
+        "database": DATABASE,
+        "clan_ids": sorted(set(ids)),
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "files": files,
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "type": "clans", "clan_ids": sorted(set(ids)), "output_dir": str(target)}
+
+
+def export_member(member_id, output_dir=None):
+    member_id = int(member_id)
+    target = Path(output_dir) if output_dir else EXPORT_DIR / ("member_{}_{}".format(member_id, timestamp()))
+    target.mkdir(parents=True, exist_ok=True)
+    copy_to("SELECT * FROM members WHERE member_id = {}".format(member_id), target / "member.csv")
+    copy_to(
+        "SELECT g.* FROM genealogies g JOIN members m ON m.clan_id = g.clan_id WHERE m.member_id = {}".format(member_id),
+        target / "genealogy.csv",
+    )
+    copy_to(
+        "SELECT p.* FROM members m JOIN members p ON p.member_id = m.father_id OR p.member_id = m.mother_id "
+        "WHERE m.member_id = {} ORDER BY p.member_id".format(member_id),
+        target / "parents.csv",
+    )
+    copy_to(
+        "SELECT * FROM members WHERE father_id = {mid} OR mother_id = {mid} ORDER BY generation_num,member_id".format(mid=member_id),
+        target / "children.csv",
+    )
+    copy_to(
+        "SELECT * FROM marriages WHERE spouse_a_id = {mid} OR spouse_b_id = {mid} ORDER BY marriage_id".format(mid=member_id),
+        target / "marriages.csv",
+    )
+    copy_to(
+        "SELECT s.* FROM marriages mg JOIN members s ON "
+        "s.member_id = CASE WHEN mg.spouse_a_id = {mid} THEN mg.spouse_b_id ELSE mg.spouse_a_id END "
+        "WHERE mg.spouse_a_id = {mid} OR mg.spouse_b_id = {mid} ORDER BY s.member_id".format(mid=member_id),
+        target / "spouses.csv",
+    )
+    files = ["member.csv", "genealogy.csv", "parents.csv", "children.csv", "marriages.csv", "spouses.csv", "ancestors.csv"]
+    try:
+        copy_to(
+            "SELECT p.* FROM member_photos p JOIN members m ON m.id_pic = p.photo_sha256 "
+            "WHERE m.member_id = {}".format(member_id),
+            target / "member_photos.csv",
+        )
+        files.append("member_photos.csv")
+    except Exception:
+        pass
+    export_member_ancestors(member_id, target / "ancestors.csv")
+    manifest = {
+        "type": "member",
+        "database": DATABASE,
+        "member_id": member_id,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "files": files,
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "type": "member", "member_id": member_id, "output_dir": str(target)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="导出 Totem genealogy 数据库")
+    subparsers = parser.add_subparsers(dest="command")
+
+    all_parser = subparsers.add_parser("all", help="导出整个数据库")
+    all_parser.add_argument("--output", default=None)
+
+    clans_parser = subparsers.add_parser("clans", help="导出一个或多个族谱")
+    clans_parser.add_argument("clan_ids", nargs="+")
+    clans_parser.add_argument("--output", default=None)
+
+    member_parser = subparsers.add_parser("member", help="导出单个成员对象的所有关联信息")
+    member_parser.add_argument("member_id")
+    member_parser.add_argument("--output", default=None)
+
+    args = parser.parse_args()
+    if args.command == "all":
+        print(export_database(args.output))
+    elif args.command == "clans":
+        print(export_clans(args.clan_ids, args.output))
+    elif args.command == "member":
+        print(export_member(args.member_id, args.output))
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

@@ -60,17 +60,26 @@ CREATE TABLE marriages (
     )
 );
 
-CREATE INDEX idx_members_father ON members(father_id);
-CREATE INDEX idx_members_mother ON members(mother_id);
-CREATE INDEX idx_members_clan ON members(clan_id);
-CREATE INDEX idx_members_clan_name ON members(clan_id, name);
-CREATE INDEX idx_members_birth ON members(birth_year);
-CREATE INDEX idx_members_gender ON members(gender);
+CREATE TABLE member_photos (
+    photo_sha256  VARCHAR(64) PRIMARY KEY,
+    content_type  VARCHAR(100) NOT NULL,
+    content_base64 TEXT NOT NULL,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Member search indexes are managed by the app performance mode:
+--   idx_members_clan, idx_members_clan_name, idx_members_father, idx_members_mother.
+-- Normal mode drops them; performance mode creates them before measured search.
 CREATE INDEX idx_collaborations_user ON collaborations(user_id);
 
 INSERT INTO users (id, user_id, password_hash, username)
-SELECT 1, 'admin', '123456', '管理员'
+SELECT 1, 'admin', 'pbkdf2_sha256$150000$oIG0zKga4xpBMJ9KI7bAOg$3TjiTzurVc75Ql8+C5hQnSf7w5O9WK3UHcntJqJY6us', '管理员'
 WHERE NOT EXISTS (SELECT 1 FROM users WHERE user_id = 'admin');
+
+INSERT INTO users (id, user_id, password_hash, username)
+SELECT 2, 'test01', 'pbkdf2_sha256$150000$oIG0zKga4xpBMJ9KI7bAOg$3TjiTzurVc75Ql8+C5hQnSf7w5O9WK3UHcntJqJY6us', '测试用户'
+WHERE NOT EXISTS (SELECT 1 FROM users WHERE user_id = 'test01');
 
 INSERT INTO genealogies (clan_id, title, surname, creator_id)
 SELECT 1, '张氏示例族谱', '张', id FROM users WHERE user_id = 'admin'

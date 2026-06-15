@@ -1,0 +1,27 @@
+{
+  "wsl": {
+    "distro": "Ubuntu-18.04",
+    "database_user": "totem",
+    "app_user": "xjz"
+  },
+  "totem": {
+    "bin_dir": "/usr/local/totem/bin",
+    "data_dir": "/usr/local/totem/data",
+    "log_file": "/tmp/totem-55432.log",
+    "database": "genealogy",
+    "user": "totem",
+    "port": "55432"
+  },
+  "app": {
+    "project_dir": "/mnt/e/totemdb/project",
+    "python": ".venv/bin/python",
+    "module": "main:app",
+    "host": "0.0.0.0",
+    "port": "8000",
+    "use_demo": "0",
+    "reload": false,
+    "background": true,
+    "pid_file": "/tmp/totem-genealogy-uvicorn.pid",
+    "log_file": "/tmp/totem-genealogy-uvicorn.log"
+  }
+}

@@ -15,6 +15,7 @@ env/
 logfile
 *.pid
 uvicorn.pid
+config/startup/startup.local.json
 
 # Generated data and database exports
 members_load.csv
@@ -22,10 +23,12 @@ genealogies_load.csv
 marriages_load.csv
 *_load.csv
 exports/
+output/
 backups/
 *_bck.sql
 *.dump
 *.backup
+references/
 
 # Test and tooling caches
 .pytest_cache/

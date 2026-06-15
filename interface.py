@@ -1,854 +1,1039 @@
 def render_app() -> str:
-    return """<!doctype html>
+    return """
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Totem 族谱管理系统</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>族谱管理系统</title>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
   <style>
-    :root {
-      --primary: #2563eb;
-      --primary-dark: #1d4ed8;
-      --bg: #f1f5f9;
-      --card: #ffffff;
-      --line: #e2e8f0;
-      --ink: #1e293b;
-      --muted: #64748b;
-      --soft: #f8fafc;
-      --danger: #ef4444;
-      --success: #10b981;
-      --violet: #7c3aed;
-      --cyan: #0891b2;
-    }
-    * { box-sizing: border-box; }
-    html, body { height: 100%; }
-    body {
-      margin: 0;
-      font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--ink);
-      height: 100vh;
-      overflow: hidden;
-      letter-spacing: 0;
-    }
-    button, input, select, textarea {
-      font: inherit;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      outline: none;
-    }
-    input, select, textarea {
-      width: 100%;
-      padding: 10px;
-      background: white;
-      color: var(--ink);
-      font-size: 13px;
-      margin-bottom: 10px;
-    }
-    textarea { min-height: 76px; resize: vertical; }
-    label {
-      display: block;
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 3px;
-    }
-    button {
-      cursor: pointer;
-      border: none;
-      color: var(--ink);
-      background: white;
-      transition: 0.18s ease;
-      white-space: nowrap;
-    }
-    button:hover { transform: translateY(-1px); }
-    .btn-primary {
-      background: var(--primary);
-      color: white;
-      height: 38px;
-      padding: 0 15px;
-      border-radius: 6px;
-      font-weight: 600;
-    }
-    .btn-primary:hover { background: var(--primary-dark); }
-    .btn-add {
-      width: 100%;
-      background: var(--success);
-      color: white;
-      padding: 12px;
-      border-radius: 6px;
-      font-weight: 700;
-    }
-    .btn-danger {
-      background: var(--danger);
-      color: white;
-      padding: 4px 10px;
-      border-radius: 4px;
-      font-size: 12px;
-    }
-    .btn-sm {
-      background: var(--primary);
-      color: white;
-      padding: 4px 10px;
-      border-radius: 4px;
-      font-size: 12px;
-    }
-    .btn-ghost {
-      background: white;
-      border: 1px solid var(--line);
-      color: var(--muted);
-      border-radius: 4px;
-      padding: 5px 10px;
-      font-size: 12px;
-    }
-
-    #loginOverlay {
-      position: fixed;
-      inset: 0;
-      background: #0f172a;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 10000;
-      padding: 24px;
-    }
-    .login-card {
-      width: 330px;
-      background: white;
-      padding: 38px;
-      border-radius: 12px;
-      box-shadow: 0 20px 25px -5px rgba(0,0,0,0.3);
-    }
-    .login-card h2 {
-      text-align: center;
-      color: var(--primary);
-      margin: 0 0 20px;
-      font-size: 24px;
-    }
-    .login-card p {
-      margin: 12px 0 0;
-      text-align: center;
-      font-size: 12px;
-      color: var(--muted);
-    }
-
-    #adminContent {
-      display: none;
-      height: 100vh;
-      flex-direction: column;
-    }
-    .navbar {
-      background: white;
-      padding: 0 24px;
-      height: 60px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-      flex-shrink: 0;
-    }
-    .brand {
-      font-weight: 800;
-      color: var(--primary);
-      font-size: 1.2rem;
-    }
-    .nav-actions {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      min-width: 0;
-    }
-    .mode-switch {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 13px;
-      color: #475569;
-      border: 1px solid var(--line);
-      padding: 4px 10px;
-      border-radius: 20px;
-      background: var(--soft);
-      user-select: none;
-    }
-    .mode-switch input {
-      width: auto;
-      margin: 0;
-    }
-    #clanSelect {
-      width: 190px;
-      margin: 0;
-      height: 34px;
-      padding: 6px 8px;
-    }
-    .main-container {
-      flex: 1;
-      display: flex;
-      gap: 15px;
-      padding: 15px;
-      overflow: hidden;
-    }
-    .side-panel {
-      width: 370px;
-      display: flex;
-      flex-direction: column;
-      gap: 15px;
-      height: 100%;
-      overflow: hidden;
-      flex-shrink: 0;
-    }
-    .viz-panel {
-      flex: 1;
-      min-width: 0;
-      background: white;
-      border-radius: 12px;
-      height: 100%;
-      position: relative;
-      overflow: hidden;
-      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.08);
-    }
-    .card {
-      background: white;
-      border-radius: 12px;
-      padding: 16px;
-      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
-      min-width: 0;
-    }
-    .card-title {
-      margin: 0 0 10px;
-      font-size: 14px;
-      color: var(--ink);
-      font-weight: 700;
-    }
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-      margin-top: 8px;
-    }
-    .stat-box {
-      background: var(--soft);
-      border: 1px solid #f1f5f9;
-      border-radius: 8px;
-      padding: 8px;
-      min-height: 58px;
-    }
-    .stat-num { font-size: 20px; font-weight: 800; color: var(--primary); }
-    .stat-label { color: #94a3b8; font-size: 11px; margin-top: 2px; }
-    .tabs {
-      display: flex;
-      gap: 4px;
-      margin-bottom: 10px;
-    }
-    .tabs button {
-      flex: 1;
-      padding: 7px 4px;
-      border-radius: 6px;
-      background: #e2e8f0;
-      color: #475569;
-      font-size: 12px;
-    }
-    .tabs button.active {
-      background: var(--primary);
-      color: white;
-      font-weight: 700;
-    }
-    .panel-view {
-      display: none;
-      flex: 1;
-      min-height: 0;
-      overflow: hidden;
-      flex-direction: column;
-    }
-    .panel-view.active { display: flex; }
-    .row { display: flex; gap: 8px; align-items: center; }
-    .search-results {
-      flex: 1;
-      overflow-y: auto;
-      margin-top: 10px;
-      padding-right: 2px;
-    }
-    .member-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 12px;
-      border: 1px solid #f1f5f9;
-      margin-bottom: 6px;
-      border-radius: 8px;
-      transition: 0.2s;
-      background: white;
-    }
-    .member-item:hover {
-      background: #f8fbff;
-      border-color: var(--primary);
-    }
-    .member-main {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-width: 0;
-      flex: 1;
-    }
-    .avatar {
-      width: 42px;
-      height: 42px;
-      border-radius: 8px;
-      object-fit: cover;
-      border: 2px solid var(--line);
-      background: #f1f5f9;
-      flex-shrink: 0;
-    }
-    .member-name { font-weight: 700; font-size: 13px; color: var(--ink); }
-    .member-sub { color: #94a3b8; font-size: 11px; margin-top: 2px; }
-    .hash {
-      max-width: 140px;
-      display: inline-block;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      vertical-align: bottom;
-      white-space: nowrap;
-      font-family: Consolas, monospace;
-      font-size: 11px;
-      color: #94a3b8;
-    }
-    .form-scroll {
-      overflow-y: auto;
-      padding-right: 2px;
-    }
-    .form-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0 8px;
-    }
-    .form-grid .full { grid-column: 1 / -1; }
-    .notice {
-      min-height: 20px;
-      font-size: 12px;
-      color: var(--muted);
-      margin: 7px 0;
-    }
-    .query-result {
-      flex: 1;
-      overflow-y: auto;
-      border-top: 1px solid #f1f5f9;
-      margin-top: 10px;
-      padding-top: 8px;
-      font-size: 12px;
-    }
-    .chip {
-      display: inline-flex;
-      align-items: center;
-      border: 1px solid #dbeafe;
-      background: #eff6ff;
-      color: #1e40af;
-      border-radius: 999px;
-      padding: 5px 9px;
-      margin: 3px;
-      font-size: 12px;
-    }
-    .path {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .tree-toolbar {
-      height: 48px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 16px;
-      border-bottom: 1px solid #f1f5f9;
-      background: white;
-    }
-    .tree-title {
-      font-weight: 800;
-      color: var(--ink);
-      font-size: 15px;
-    }
-    #treePreview {
-      height: calc(100% - 48px);
-      width: 100%;
-      overflow: hidden;
-      padding: 0;
-      background:
-        linear-gradient(#f8fafc 1px, transparent 1px),
-        linear-gradient(90deg, #f8fafc 1px, transparent 1px);
-      background-size: 28px 28px;
-    }
-    .tree-root {
-      display: flex;
-      gap: 28px;
-      align-items: flex-start;
-    }
-    .node {
-      min-width: 175px;
-      border: 1px solid #dbeafe;
-      border-left: 5px solid var(--primary);
-      border-radius: 10px;
-      padding: 10px 12px;
-      background: white;
-      margin: 8px 0;
-      box-shadow: 0 4px 10px rgba(37,99,235,0.08);
-    }
-    .node strong { color: var(--ink); font-size: 14px; }
-    .node .meta { color: #94a3b8; font-size: 11px; margin-top: 4px; }
-    .children {
-      margin-left: 25px;
-      border-left: 1px dashed #bfdbfe;
-      padding-left: 16px;
-    }
-    .user-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 12px;
-    }
-    .user-table th {
-      color: white;
-      background: var(--primary);
-      text-align: left;
-      padding: 7px;
-    }
-    .user-table td {
-      border-bottom: 1px solid #f1f5f9;
-      padding: 7px;
-      color: #475569;
-    }
-    @media (max-width: 920px) {
-      body { overflow: auto; height: auto; }
-      #adminContent { height: auto; min-height: 100vh; }
-      .navbar { height: auto; padding: 12px; gap: 10px; align-items: flex-start; flex-direction: column; }
-      .nav-actions { flex-wrap: wrap; width: 100%; }
-      .main-container { flex-direction: column; height: auto; overflow: visible; }
-      .side-panel { width: 100%; height: auto; }
-      .viz-panel { min-height: 560px; }
-    }
+    :root { --primary:#2563eb; --bg:#f1f5f9; --danger:#ef4444; --success:#10b981; --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --violet:#7c3aed; --cyan:#0891b2; }
+    * { box-sizing:border-box; }
+    body { font-family:"PingFang SC","Microsoft YaHei",sans-serif; margin:0; background:var(--bg); height:100vh; overflow:hidden; color:var(--ink); }
+    button,input,select,textarea { font:inherit; outline:none; }
+    input,select,textarea { width:100%; padding:10px; border:1px solid var(--line); border-radius:6px; margin-bottom:10px; font-size:13px; background:white; }
+    textarea { min-height:72px; resize:vertical; }
+    label { font-size:12px; color:var(--muted); margin-bottom:3px; display:block; }
+    button { cursor:pointer; white-space:nowrap; }
+    button:disabled { cursor:not-allowed; opacity:.45; }
+    #loginOverlay { position:fixed; inset:0; background:#0f172a; display:flex; align-items:center; justify-content:center; z-index:10000; }
+    .login-card { background:white; padding:40px; border-radius:12px; width:330px; box-shadow:0 20px 25px -5px rgba(0,0,0,.3); }
+    .login-card h2 { text-align:center; color:var(--primary); margin:0 0 20px; }
+    .login-card p { text-align:center; font-size:12px; color:var(--muted); margin:14px 0 0; }
+    #adminContent { display:none; height:100vh; flex-direction:column; }
+    .navbar { background:white; padding:0 24px; height:60px; display:flex; align-items:center; justify-content:space-between; box-shadow:0 1px 2px rgba(0,0,0,.05); gap:12px; }
+    .brand { font-weight:800; color:var(--primary); font-size:1.2rem; }
+    .nav-actions { display:flex; gap:8px; align-items:center; min-width:0; }
+    .mode-switch { display:flex; align-items:center; gap:6px; font-size:13px; color:#475569; border:1px solid var(--line); padding:4px 10px; border-radius:20px; background:#f8fafc; user-select:none; }
+    .mode-switch input { width:auto; margin:0; }
+    .main-container { flex:1; display:flex; padding:15px; gap:15px; overflow:hidden; }
+    .side-panel { width:370px; display:flex; flex-direction:column; gap:15px; height:100%; overflow:hidden; flex-shrink:0; }
+    .viz-panel { flex:1; background:white; border-radius:12px; height:100%; position:relative; overflow:hidden; box-shadow:0 4px 6px -1px rgba(0,0,0,.08); }
+    .card { background:white; border-radius:12px; padding:16px; box-shadow:0 4px 6px -1px rgba(0,0,0,.1); }
+    .btn-primary { background:var(--primary); color:white; border:none; padding:0 15px; border-radius:6px; cursor:pointer; height:38px; }
+    .btn-add { width:100%; background:var(--success); color:white; border:none; padding:12px; border-radius:6px; cursor:pointer; font-weight:700; }
+    .btn-danger { background:var(--danger); color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer; font-size:12px; }
+    .btn-sm { background:var(--primary); color:white; border:none; padding:5px 10px; border-radius:4px; cursor:pointer; font-size:12px; }
+    .btn-ghost { background:white; border:1px solid var(--line); color:var(--muted); border-radius:4px; padding:5px 10px; font-size:12px; }
+    .btn-violet { background:var(--violet); color:white; border:none; padding:5px 10px; border-radius:4px; font-size:12px; }
+    .btn-cyan { background:var(--cyan); color:white; border:none; padding:5px 10px; border-radius:4px; font-size:12px; }
+    .search-results { flex:1; overflow-y:auto; margin-top:10px; }
+    .member-item,.clan-item { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:10px 12px; border:1px solid #f1f5f9; margin-bottom:6px; border-radius:8px; transition:.2s; background:white; }
+    .member-item:hover,.clan-item:hover { background:#f8fbff; border-color:var(--primary); }
+    .member-item-left { cursor:pointer; flex:1; min-width:0; }
+    .sub { color:#94a3b8; font-size:11px; margin-top:2px; }
+    .badge { font-size:11px; padding:2px 7px; border-radius:10px; font-weight:600; }
+    .badge-owner { background:#fef3c7; color:#92400e; }
+    .badge-collab { background:#dbeafe; color:#1e40af; }
+    .badge-readonly { background:#f1f5f9; color:#94a3b8; }
+    .tabs { display:flex; gap:4px; margin-bottom:10px; }
+    .tabs button { flex:1; padding:7px 4px; border:none; border-radius:6px; background:#e2e8f0; color:#475569; font-size:12px; }
+    .tabs button.active { background:var(--primary); color:white; font-weight:700; }
+    #stats-chart { height:130px; width:100%; }
+    #chart-container { width:100%; height:100%; background:linear-gradient(#f8fafc 1px, transparent 1px), linear-gradient(90deg,#f8fafc 1px,transparent 1px); background-size:28px 28px; }
+    .tree-tools { position:absolute; top:12px; right:12px; z-index:10; display:flex; gap:6px; }
+    .modal-overlay { display:none; position:fixed; inset:0; background:rgba(15,23,42,.48); z-index:9000; align-items:center; justify-content:center; padding:24px; }
+    .modal-overlay.active { display:flex; }
+    .modal-box { background:white; border-radius:12px; padding:28px; width:430px; box-shadow:0 20px 40px rgba(0,0,0,.2); max-height:86vh; overflow-y:auto; }
+    .modal-box.wide { width:660px; max-width:95vw; }
+    .modal-box h3 { margin:0 0 18px; color:var(--ink); }
+    .modal-footer { display:flex; gap:8px; margin-top:16px; justify-content:flex-end; }
+    .btn-cancel { background:#e2e8f0; color:#475569; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; }
+    .notice { min-height:18px; font-size:12px; color:var(--muted); margin:7px 0; }
+    .table-wrap { overflow:auto; border:1px solid #f1f5f9; border-radius:8px; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th { background:var(--primary); color:white; text-align:left; padding:7px; }
+    td { border-bottom:1px solid #f1f5f9; padding:7px; color:#475569; vertical-align:middle; }
+    .query-result-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+    .query-result-table th { background:#2563eb; color:white; padding:6px 8px; text-align:left; font-weight:600; }
+    .query-result-table td { padding:5px 8px; border-bottom:1px solid #f1f5f9; color:#475569; }
+    .detail-grid { display:grid; grid-template-columns:110px 1fr 110px 1fr; gap:0; border:1px solid #f1f5f9; border-radius:8px; overflow:hidden; margin-bottom:14px; }
+    .detail-grid div { padding:8px 10px; border-bottom:1px solid #f1f5f9; font-size:12px; }
+    .detail-grid div:nth-child(4n+1), .detail-grid div:nth-child(4n+3) { background:#f8fafc; color:#64748b; font-weight:600; }
+    .detail-section-title { margin:12px 0 8px; font-size:13px; font-weight:700; color:#1e293b; }
+    @media (max-width:980px) { body { overflow:auto; height:auto; } #adminContent { height:auto; min-height:100vh; } .navbar { height:auto; padding:12px; flex-direction:column; align-items:flex-start; } .nav-actions { flex-wrap:wrap; } .main-container { flex-direction:column; height:auto; overflow:visible; } .side-panel { width:100%; } .viz-panel { min-height:560px; } }
   </style>
 </head>
 <body>
   <div id="loginOverlay">
-    <form class="login-card" id="loginForm">
+    <div class="login-card">
       <h2>系统登录</h2>
-      <input id="loginUser" value="admin" placeholder="账号" autocomplete="username">
-      <input id="loginPassword" type="password" value="123456" placeholder="密码" autocomplete="current-password">
-      <div class="notice" id="loginMessage" style="text-align:center;color:var(--danger)"></div>
-      <button class="btn-add" type="submit">进入系统</button>
-      <p>默认演示账号 admin / 123456</p>
-    </form>
+      <input type="text" id="login_uid" value="admin" placeholder="账号" autocomplete="username">
+      <input type="password" id="login_pwd" value="123456" placeholder="密码" autocomplete="current-password">
+      <div id="loginMsg" class="notice" style="text-align:center;color:var(--danger)"></div>
+      <button class="btn-add" onclick="handleLogin()">进入系统</button>
+      <p>默认账号 admin / 123456，普通测试账号 test01 / 123456</p>
+    </div>
   </div>
 
   <div id="adminContent">
     <div class="navbar">
       <div class="brand">族谱管理系统</div>
+      <div id="currentUserLabel" style="color:#64748b;font-size:13px;">未登录</div>
       <div class="nav-actions">
-        <label class="mode-switch" title="显示当前连接信息">
+        <label class="mode-switch" title="开启后显示索引性能指标">
           <input type="checkbox" id="perfModeToggle">
-          <span>Totem 模式</span>
+          <span>性能模式</span>
         </label>
-        <select id="clanSelect" aria-label="族谱"></select>
-        <button class="btn-ghost" data-panel="members">成员查询</button>
-        <button class="btn-ghost" data-panel="form">添加成员</button>
-        <button class="btn-ghost" data-panel="queries">统计查询</button>
-        <button class="btn-ghost" data-panel="users">协作者</button>
-        <button class="btn-ghost" id="refreshBtn">刷新</button>
+        <button class="btn-sm" onclick="toggleClanView()">我的族谱</button>
+        <button class="btn-sm" style="background:var(--success)" onclick="openImportModal()">导入族谱</button>
+        <button class="btn-sm" style="background:var(--cyan)" onclick="openExportModal()">导出族谱</button>
+        <button class="btn-cyan" onclick="openQueryModal()">统计查询</button>
+        <button class="btn-violet" onclick="toggleUserView()">用户管理</button>
+        <button class="btn-ghost" onclick="logout()">退出</button>
       </div>
     </div>
 
     <div class="main-container">
       <div class="side-panel">
         <div class="card">
-          <h4 class="card-title">数据概览</h4>
-          <div id="chart-clan-label" style="font-size:11px;color:#94a3b8;margin-bottom:4px;text-align:center;">当前族谱统计</div>
-          <div id="stats-chart" style="height:130px"></div>
-          <div class="stats-grid">
-            <div class="stat-box"><div class="stat-num" id="totalMembers">0</div><div class="stat-label">成员总数</div></div>
-            <div class="stat-box"><div class="stat-num" id="genderRatio">0/0</div><div class="stat-label">男 / 女 / 未知</div></div>
-            <div class="stat-box"><div class="stat-num" id="collabCount">0</div><div class="stat-label">协作者</div></div>
-          </div>
-          <div id="oldestMember" class="notice">暂无年长成员数据</div>
+          <h4 style="margin:0 0 10px;">数据概览</h4>
+          <div id="chart-clan-label" style="font-size:11px;color:#94a3b8;margin-bottom:4px;text-align:center;">全库统计</div>
+          <div id="stats-chart"></div>
         </div>
 
         <div class="card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
-          <div class="tabs">
-            <button class="active" data-tab="membersPanel">成员查询</button>
-            <button data-tab="formPanel">成员编辑</button>
-            <button data-tab="queriesPanel">关系查询</button>
-            <button data-tab="usersPanel">协作</button>
+          <div id="search-view" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
+            <div class="tabs">
+              <button id="tab-search" class="active" onclick="switchTab('search')">成员查询</button>
+              <button id="tab-relation" onclick="switchTab('relation')">查询关系</button>
+            </div>
+            <div id="panel-search" style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
+              <div style="display:flex;gap:8px">
+                <input type="text" id="nameInput" placeholder="输入姓名或编号查询..." style="margin:0">
+                <button class="btn-primary" onclick="search()">查询</button>
+                <button class="btn-violet" onclick="runExplain()">EXPLAIN</button>
+                <button class="btn-primary" style="background:var(--success)" onclick="openAddMember()">添加</button>
+              </div>
+              <div id="search-msg" class="notice"></div>
+              <div class="search-results" id="search-results"></div>
+            </div>
+            <div id="panel-relation" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+              <input type="number" id="relIdA" placeholder="成员 A ID">
+              <input type="number" id="relIdB" placeholder="成员 B ID">
+              <button class="btn-primary" onclick="queryRelation()" style="width:100%;margin-bottom:8px;">查询亲缘关系</button>
+              <div id="relation-msg" class="notice"></div>
+              <div id="relation-result" style="overflow-y:auto;flex:1;"></div>
+            </div>
           </div>
 
-          <section id="membersPanel" class="panel-view active">
-            <div class="row">
-              <input id="memberSearch" placeholder="输入姓名或编号查询..." style="margin:0">
-              <button class="btn-primary" id="searchBtn">查询</button>
-            </div>
-            <div id="search-msg" class="notice"></div>
-            <div class="search-results" id="memberRows"></div>
-          </section>
-
-          <section id="formPanel" class="panel-view">
-            <h4 class="card-title" id="memberFormTitle">新增成员</h4>
-            <form id="memberForm" class="form-scroll">
-              <input type="hidden" id="memberId">
-              <div class="form-grid">
-                <label>姓名<input id="memberName" required></label>
-                <label>性别<select id="memberGender"><option value="M">男</option><option value="F">女</option><option value="U">未知</option></select></label>
-                <label>出生年<input id="birthYear" type="number"></label>
-                <label>死亡年<input id="deathYear" type="number"></label>
-                <label>父亲 ID<input id="fatherId" type="number"></label>
-                <label>母亲 ID<input id="motherId" type="number"></label>
-                <label>世代<input id="generationNum" type="number"></label>
-                <label class="full">照片<input id="memberPhoto" type="file" accept="image/*"></label>
-                <label class="full">简介<textarea id="memberBio"></textarea></label>
+          <div id="clan-view" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+              <span style="font-size:13px;font-weight:600;">族谱管理</span>
+              <div>
+                <button class="btn-sm" style="background:var(--success)" onclick="openClanModal()">新建</button>
+                <button class="btn-ghost" onclick="toggleClanView()">关闭</button>
               </div>
-              <div class="row">
-                <button class="btn-add" type="submit">保存成员</button>
-                <button class="btn-ghost" type="button" id="resetMemberForm">清空</button>
+            </div>
+            <div id="clan-list" style="overflow-y:auto;flex:1;"></div>
+          </div>
+
+          <div id="user-view" style="display:none;flex-direction:column;flex:1;overflow:hidden;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+              <span style="font-size:13px;font-weight:600;">用户管理</span>
+              <div>
+                <button class="btn-sm" style="background:var(--success)" onclick="openUserModal()">新建</button>
+                <button class="btn-ghost" onclick="toggleUserView()">关闭</button>
               </div>
-              <div class="notice">照片只计算 SHA-256 存入数据库，不保存图片文件。</div>
-            </form>
-          </section>
-
-          <section id="queriesPanel" class="panel-view">
-            <h4 class="card-title">人物祖先查询</h4>
-            <div class="row">
-              <input id="ancestorId" type="number" placeholder="成员 ID" style="margin:0">
-              <button class="btn-primary" id="ancestorBtn">查询</button>
             </div>
-            <div id="ancestorResult" class="query-result" style="max-height:150px"></div>
-            <h4 class="card-title" style="margin-top:12px">亲缘关系通路</h4>
-            <input id="sourceId" type="number" placeholder="起点成员 ID">
-            <input id="targetId" type="number" placeholder="目标成员 ID">
-            <button class="btn-primary" id="relationBtn" style="width:100%">查询亲缘关系</button>
-            <div id="relationResult" class="query-result path"></div>
-          </section>
-
-          <section id="usersPanel" class="panel-view">
-            <h4 class="card-title">邀请编辑</h4>
-            <div class="row">
-              <input id="inviteUser" placeholder="输入用户账号，例如 editor" style="margin:0">
-              <button id="inviteBtn" class="btn-primary">邀请</button>
-            </div>
-            <p class="notice" id="inviteMessage"></p>
-            <h4 class="card-title">用户列表</h4>
-            <div style="overflow:auto">
-              <table class="user-table">
-                <thead><tr><th>ID</th><th>账号</th><th>用户名</th></tr></thead>
-                <tbody id="userRows"></tbody>
-              </table>
-            </div>
-          </section>
+            <div class="notice">仅 admin 可以新建、编辑和删除用户。</div>
+            <div id="user-list" style="overflow-y:auto;flex:1;"></div>
+          </div>
         </div>
       </div>
-
       <div class="viz-panel">
-        <div class="tree-toolbar">
-          <div>
-            <div class="tree-title">树形预览</div>
-            <div class="member-sub" id="currentUser">未登录</div>
-          </div>
-          <button class="btn-primary" onclick="loadTree()">全族谱</button>
+        <div class="tree-tools">
+          <button class="btn-ghost" onclick="zoomTree(0.82)">缩小</button>
+          <button class="btn-ghost" onclick="zoomTree(1.18)">放大</button>
+          <button class="btn-primary" onclick="resetTreeView()">重置</button>
         </div>
-        <div id="treePreview"></div>
+        <div id="chart-container"></div>
       </div>
     </div>
   </div>
 
+  <div class="modal-overlay" id="memberModal">
+    <div class="modal-box">
+      <h3 id="memberModalTitle">成员信息</h3>
+      <input type="hidden" id="member_id">
+      <label>族谱</label><select id="member_clan"></select>
+      <label>姓名</label><input id="member_name">
+      <label>性别</label><select id="member_gender"><option value="M">男</option><option value="F">女</option><option value="U">未知</option></select>
+      <label>出生年</label><input type="number" id="member_birth">
+      <label>死亡年</label><input type="number" id="member_death">
+      <label>父亲 ID</label><input type="number" id="member_father">
+      <label>母亲 ID</label><input type="number" id="member_mother">
+      <label>世代</label><input type="number" id="member_generation">
+      <label>简介</label><textarea id="member_bio"></textarea>
+      <label>照片</label><input type="file" id="member_photo" accept="image/*">
+      <div id="memberMsg" class="notice" style="color:var(--danger)"></div>
+      <div class="modal-footer">
+        <button class="btn-cancel" onclick="closeModal('memberModal')">取消</button>
+        <button class="btn-primary" onclick="submitMember()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="detailModal">
+    <div class="modal-box wide">
+      <h3 id="detailTitle">成员详情</h3>
+      <div id="detailBody"></div>
+      <div class="modal-footer"><button class="btn-cancel" onclick="closeModal('detailModal')">关闭</button></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="clanModal">
+    <div class="modal-box">
+      <h3 id="clanModalTitle">族谱信息</h3>
+      <input type="hidden" id="clan_id">
+      <label>族谱标题</label><input id="clan_title">
+      <label>姓氏</label><input id="clan_surname">
+      <div id="clanMsg" class="notice" style="color:var(--danger)">创建者默认为当前登录用户。</div>
+      <div class="modal-footer">
+        <button class="btn-cancel" onclick="closeModal('clanModal')">取消</button>
+        <button class="btn-primary" onclick="submitClan()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="userModal">
+    <div class="modal-box">
+      <h3 id="userModalTitle">用户信息</h3>
+      <input type="hidden" id="user_numeric_id">
+      <label>账号</label><input id="user_account">
+      <label>用户名</label><input id="user_name">
+      <label>密码</label><input id="user_password" type="password" placeholder="编辑时留空表示不修改">
+      <div id="userMsg" class="notice" style="color:var(--danger)"></div>
+      <div class="modal-footer">
+        <button class="btn-cancel" onclick="closeModal('userModal')">取消</button>
+        <button class="btn-primary" onclick="submitUser()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="userDetailModal">
+    <div class="modal-box wide">
+      <h3 id="userDetailTitle">用户详情</h3>
+      <div id="userDetailBody"></div>
+      <div class="modal-footer"><button class="btn-cancel" onclick="closeModal('userDetailModal')">关闭</button></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="collabModal">
+    <div class="modal-box">
+      <h3>协作者管理</h3>
+      <p style="font-size:13px;color:#64748b;margin-top:0;">族谱 <span id="collab_clan_id_label"></span></p>
+      <div style="display:flex;gap:8px;"><input id="grant_user_input" placeholder="输入用户账号" style="margin:0"><button class="btn-primary" onclick="grantAccess()">授权</button></div>
+      <div id="grantMsg" class="notice"></div>
+      <div id="collabList"></div>
+      <div class="modal-footer"><button class="btn-cancel" onclick="closeModal('collabModal')">关闭</button></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="importModal">
+    <div class="modal-box">
+      <h3>导入族谱</h3>
+      <label>族谱标题</label><input id="import_title" placeholder="例如：张氏导入族谱">
+      <label>姓氏</label><input id="import_surname" placeholder="例如：张">
+      <label>成员 CSV</label><input type="file" id="import_csv" accept=".csv,text/csv">
+      <div class="notice">CSV 至少需要 name/姓名 字段，可选 gender、birth_year、death_year、father_id、mother_id、generation_num、bio。</div>
+      <div id="importMsg" class="notice"></div>
+      <div class="modal-footer">
+        <button class="btn-cancel" onclick="closeModal('importModal')">取消</button>
+        <button class="btn-primary" onclick="submitClanImport()">导入 CSV 新建族谱</button>
+        <button class="btn-danger" onclick="submitGeneratedImport()" title="清空现有族谱、成员、婚姻和协作关系后导入生成脚本数据">导入生成数据</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="exportModal">
+    <div class="modal-box wide">
+      <h3>导出族谱</h3>
+      <div id="exportClanList" class="table-wrap" style="max-height:300px;overflow:auto;padding:8px;"></div>
+      <div id="exportMsg" class="notice"></div>
+      <div class="modal-footer">
+        <button class="btn-cancel" onclick="closeModal('exportModal')">取消</button>
+        <button class="btn-primary" onclick="submitClanExport()">导出所选族谱</button>
+        <button class="btn-violet" onclick="submitDatabaseExport()">导出整个数据库</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="queryModal">
+    <div class="modal-box wide">
+      <h3>统计查询</h3>
+      <div class="tabs" style="flex-wrap:wrap;">
+        <button id="qt-spouse" onclick="switchQueryTab('spouse')" class="active">配偶/子女</button>
+        <button id="qt-ancestors" onclick="switchQueryTab('ancestors')">祖先</button>
+        <button id="qt-longevity" onclick="switchQueryTab('longevity')">最长寿一代</button>
+        <button id="qt-singles" onclick="switchQueryTab('singles')">50+单身男性</button>
+        <button id="qt-early" onclick="switchQueryTab('early')">早于均值</button>
+        <button id="qt-descendants" onclick="switchQueryTab('descendants')">四代曾孙</button>
+      </div>
+      <div id="qp-spouse"><input id="q-spouse-id" type="number" placeholder="成员 ID"><button class="btn-primary" onclick="runQuery('spouse')" style="width:100%">查询</button><div id="qr-spouse"></div></div>
+      <div id="qp-ancestors" style="display:none"><input id="q-ancestors-id" type="number" placeholder="成员 ID"><button class="btn-primary" onclick="runQuery('ancestors')" style="width:100%">查询</button><div id="qr-ancestors"></div></div>
+      <div id="qp-longevity" style="display:none"><select id="q-longevity-clan"></select><button class="btn-primary" onclick="runQuery('longevity')" style="width:100%">查询</button><div id="qr-longevity"></div></div>
+      <div id="qp-singles" style="display:none"><select id="q-singles-clan"></select><button class="btn-primary" onclick="runQuery('singles')" style="width:100%">查询</button><div id="qr-singles"></div></div>
+      <div id="qp-early" style="display:none"><select id="q-early-clan"></select><button class="btn-primary" onclick="runQuery('early')" style="width:100%">查询</button><div id="qr-early"></div></div>
+      <div id="qp-descendants" style="display:none"><input id="q-descendants-name" type="text" placeholder="成员姓名"><button class="btn-primary" onclick="runQuery('descendants')" style="width:100%">查询</button><div id="qr-descendants"></div></div>
+      <div class="modal-footer"><button class="btn-cancel" onclick="closeModal('queryModal')">关闭</button></div>
+    </div>
+  </div>
+
   <script>
-    const state = { clanId: 1, members: [], dashboard: null, treeChart: null };
+    let myChart = null, pieChart = null;
+    const state = { user:null, clans:[], users:[], currentClanId:0, currentPerm:{can_edit:false,is_owner:false}, currentTreeMemberId:null, currentDetailMemberId:null, treeZoom:1 };
     const $ = (id) => document.getElementById(id);
-    const api = async (url, options = {}) => {
-      const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...options });
-      if (!res.ok) throw new Error((await res.json()).detail || "请求失败");
+    const esc = (v) => (v == null ? "" : String(v)).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+    const num = (v) => v === "" || v == null ? null : Number(v);
+    const formatDate = (v) => v ? String(v).replace("T", " ").slice(0, 19) : "-";
+    const actorId = () => state.user ? state.user.user_id : "";
+    const actorParam = () => `current_user_id=${encodeURIComponent(actorId())}`;
+    async function api(url, options={}) {
+      const headers = options.body instanceof FormData ? {} : {"Content-Type":"application/json"};
+      const res = await fetch(url, {headers, ...options});
+      if (!res.ok) {
+        let detail = "请求失败";
+        try { detail = (await res.json()).detail || detail; } catch(e) {}
+        throw new Error(detail);
+      }
       if (res.status === 204) return null;
       return res.json();
-    };
-    const num = (value) => value === "" ? null : Number(value);
+    }
 
-    $("loginForm").addEventListener("submit", async (event) => {
-      event.preventDefault();
+    async function handleLogin() {
+      const msg = $("loginMsg");
       try {
-        const data = await api("/api/login", { method: "POST", body: JSON.stringify({ user_id: $("loginUser").value, password: $("loginPassword").value }) });
-        $("currentUser").textContent = `${data.user.username || data.user.user_id} | 已登录`;
+        msg.textContent = "验证中...";
+        const data = await api("/api/login", {method:"POST", body:JSON.stringify({user_id:$("login_uid").value, password:$("login_pwd").value})});
+        state.user = data.user;
+        $("currentUserLabel").textContent = `${data.user.username || data.user.user_id} | 已登录`;
         $("loginOverlay").style.display = "none";
         $("adminContent").style.display = "flex";
-        await boot();
-      } catch (error) {
-        $("loginMessage").textContent = error.message;
-      }
-    });
-
-    document.querySelectorAll(".tabs button").forEach((button) => {
-      button.addEventListener("click", () => switchTab(button.dataset.tab));
-    });
-    document.querySelectorAll("[data-panel]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const map = { members: "membersPanel", form: "formPanel", queries: "queriesPanel", users: "usersPanel" };
-        switchTab(map[button.dataset.panel]);
-      });
-    });
-
-    function switchTab(tabId) {
-      document.querySelectorAll(".tabs button").forEach((item) => item.classList.toggle("active", item.dataset.tab === tabId));
-      document.querySelectorAll(".panel-view").forEach((view) => view.classList.toggle("active", view.id === tabId));
+        await initApp();
+      } catch(e) { msg.textContent = e.message; }
+    }
+    async function logout() {
+      state.user = null;
+      state.currentClanId = 0;
+      if (myChart) myChart.clear();
+      if (pieChart) pieChart.clear();
+      $("adminContent").style.display = "none";
+      $("loginOverlay").style.display = "flex";
+      $("login_pwd").value = "";
+      $("loginMsg").textContent = "";
+    }
+    async function initApp() {
+      setTimeout(() => {
+        if (window.echarts) {
+          if (!myChart) myChart = echarts.init($("chart-container"));
+          if (!pieChart) pieChart = echarts.init($("stats-chart"));
+          window.addEventListener("resize", () => { myChart && myChart.resize(); pieChart && pieChart.resize(); });
+          updateDashboard(state.currentClanId);
+        }
+      }, 80);
+      await loadClans();
+      await loadUsers();
+      await updateDashboard();
+      resetSearchPanel();
+      renderEmptyTree();
     }
 
-    $("refreshBtn").addEventListener("click", () => loadAll());
-    $("clanSelect").addEventListener("change", () => { state.clanId = Number($("clanSelect").value); loadAll(); });
-    $("searchBtn").addEventListener("click", () => loadMembers());
-    $("memberSearch").addEventListener("keydown", (event) => { if (event.key === "Enter") loadMembers(); });
-    $("resetMemberForm").addEventListener("click", resetMemberForm);
-    $("ancestorBtn").addEventListener("click", loadAncestors);
-    $("relationBtn").addEventListener("click", loadRelationship);
-    $("inviteBtn").addEventListener("click", inviteUser);
-
-    $("memberForm").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const payload = {
-        clan_id: state.clanId,
-        name: $("memberName").value,
-        gender: $("memberGender").value,
-        birth_year: num($("birthYear").value),
-        death_year: num($("deathYear").value),
-        father_id: num($("fatherId").value),
-        mother_id: num($("motherId").value),
-        generation_num: num($("generationNum").value),
-        bio: $("memberBio").value
-      };
-      const id = $("memberId").value;
-      const saved = await api(id ? `/api/members/${id}` : "/api/members", { method: id ? "PUT" : "POST", body: JSON.stringify(payload) });
-      if ($("memberPhoto").files.length) {
-        await uploadMemberPhoto(saved.member_id || id, $("memberPhoto").files[0]);
-      }
-      resetMemberForm();
-      switchTab("membersPanel");
-      await loadAll();
-    });
-
-    async function boot() {
-      const clans = await api("/api/clans");
-      $("clanSelect").innerHTML = clans.map((clan) => `<option value="${clan.clan_id}">${clan.title || clan.surname || clan.clan_id}</option>`).join("");
-      state.clanId = Number($("clanSelect").value || 1);
-      await loadAll();
-    }
-
-    async function loadAll() {
-      await Promise.all([loadDashboard(), loadMembers(), loadTree(), loadUsers()]);
-    }
-
-    async function loadDashboard() {
-      const data = await api(`/api/dashboard?clan_id=${state.clanId}`);
-      state.dashboard = data;
-      $("totalMembers").textContent = data.total_members;
-      $("genderRatio").textContent = `${data.gender.M || 0}/${data.gender.F || 0}/${data.gender.U || 0}`;
-      $("collabCount").textContent = data.collaborators;
-      $("oldestMember").textContent = data.oldest ? `年纪最长：${data.oldest.name}，${data.oldest.birth_year || "生年未知"}，第 ${data.oldest.generation_num || "?"} 代` : "暂无年长成员数据";
-      renderStatsChart(data);
-    }
-
-    function renderStatsChart(data) {
-      if (!window.echarts) return;
-      const chart = echarts.init($("stats-chart"));
-      chart.setOption({
-        tooltip: { trigger: "item" },
-        series: [{
-          type: "pie",
-          radius: ["45%", "72%"],
-          avoidLabelOverlap: true,
-          label: { fontSize: 11 },
-          data: [
-            { value: data.gender.M || 0, name: "男" },
-            { value: data.gender.F || 0, name: "女" },
-            { value: data.gender.U || 0, name: "未知" }
-          ],
-          color: ["#2563eb", "#ec4899", "#94a3b8"]
-        }]
-      });
-    }
-
-    async function loadMembers() {
-      state.members = await api(`/api/members?clan_id=${state.clanId}&q=${encodeURIComponent($("memberSearch").value)}`);
-      $("search-msg").textContent = `共找到 ${state.members.length} 位成员`;
-      $("memberRows").innerHTML = state.members.map((member) => `
-        <div class="member-item">
-          <div class="member-main">
-            <img class="avatar" src="/resources/defaultpic.jpg" alt="">
-            <div style="min-width:0">
-              <div class="member-name">${member.name}</div>
-              <div class="member-sub">#${member.member_id} · ${member.gender_label || member.gender} · 第 ${member.generation_num || "?"} 代</div>
-              <div class="member-sub">${member.birth_year || "生年未知"}${member.death_year ? " - " + member.death_year : ""} · 父/母 ${member.father_id || "-"} / ${member.mother_id || "-"}</div>
-              <div class="hash" title="${member.id_pic || ""}">${member.id_pic ? "照片 " + member.id_pic : "默认照片"}</div>
-            </div>
-          </div>
-          <div class="row">
-            <button class="btn-sm" onclick="loadTree(${member.member_id})">查看</button>
-            <button class="btn-sm" onclick="editMember(${member.member_id})">编辑</button>
-            <button class="btn-danger" onclick="deleteMember(${member.member_id})">删除</button>
-          </div>
-        </div>`).join("") || "<div class='notice'>暂无成员</div>";
-    }
-
-    window.editMember = (id) => {
-      const member = state.members.find((item) => Number(item.member_id) === Number(id));
-      if (!member) return;
-      $("memberFormTitle").textContent = `编辑成员 #${id}`;
-      $("memberId").value = member.member_id;
-      $("memberName").value = member.name || "";
-      $("memberGender").value = member.gender || "U";
-      $("birthYear").value = member.birth_year || "";
-      $("deathYear").value = member.death_year || "";
-      $("fatherId").value = member.father_id || "";
-      $("motherId").value = member.mother_id || "";
-      $("generationNum").value = member.generation_num || "";
-      $("memberBio").value = member.bio || "";
-      $("memberPhoto").value = "";
-      switchTab("formPanel");
-    };
-
-    async function uploadMemberPhoto(memberId, file) {
-      const form = new FormData();
-      form.append("photo", file);
-      const res = await fetch(`/api/members/${memberId}/photo`, { method: "POST", body: form });
-      if (!res.ok) throw new Error((await res.json()).detail || "照片上传失败");
-      return res.json();
-    }
-
-    window.deleteMember = async (id) => {
-      if (!confirm(`确认删除成员 #${id}？`)) return;
-      await api(`/api/members/${id}`, { method: "DELETE" });
-      await loadAll();
-    };
-
-    function resetMemberForm() {
-      $("memberForm").reset();
-      $("memberId").value = "";
-      $("memberFormTitle").textContent = "新增成员";
-    }
-
-    async function loadTree(rootId) {
-      const rootParam = rootId ? `&root_id=${rootId}` : "";
-      const data = await api(`/api/tree?clan_id=${state.clanId}${rootParam}`);
-      renderTreeChart(data.roots || [], rootId);
-    }
-
-    function renderTreeChart(roots, rootId) {
-      if (!window.echarts) {
-        $("treePreview").innerHTML = "<p class='notice' style='padding:18px'>ECharts 未加载，无法绘制动态图。</p>";
-        return;
-      }
-      if (!roots.length) {
-        if (state.treeChart) state.treeChart.clear();
-        $("treePreview").innerHTML = "<p class='notice' style='padding:18px'>暂无树形数据</p>";
-        return;
-      }
-      if (!state.treeChart) {
-        $("treePreview").innerHTML = "";
-        state.treeChart = echarts.init($("treePreview"));
-        window.addEventListener("resize", () => state.treeChart && state.treeChart.resize());
-      } else if (state.treeChart.isDisposed && state.treeChart.isDisposed()) {
-        $("treePreview").innerHTML = "";
-        state.treeChart = echarts.init($("treePreview"));
-      }
-      const data = roots.map((root) => toChartNode(root, 0));
-      state.treeChart.setOption({
-        tooltip: {
-          trigger: "item",
-          triggerOn: "mousemove",
-          formatter: (params) => {
-            const d = params.data || {};
-            return `<b>${d.name}</b><br/>成员ID：${d.member_id || "-"}<br/>世代：${d.generation || "-"}<br/>生年：${d.birth_year || "-"}`;
-          }
-        },
-        series: [{
-          type: "tree",
-          data: data,
-          top: "4%",
-          left: "8%",
-          bottom: "4%",
-          right: "18%",
-          symbol: "roundRect",
-          symbolSize: [86, 28],
-          orient: "LR",
-          roam: true,
-          expandAndCollapse: true,
-          initialTreeDepth: rootId ? 3 : 4,
-          animationDuration: 450,
-          animationDurationUpdate: 650,
-          label: {
-            position: "inside",
-            verticalAlign: "middle",
-            align: "center",
-            color: "#ffffff",
-            fontSize: 12,
-            overflow: "truncate",
-            width: 76
-          },
-          leaves: {
-            label: {
-              position: "right",
-              verticalAlign: "middle",
-              align: "left",
-              color: "#334155"
-            }
-          },
-          itemStyle: {
-            color: "#2563eb",
-            borderColor: "#1d4ed8",
-            borderWidth: 1
-          },
-          lineStyle: {
-            color: "#93c5fd",
-            width: 1.5,
-            curveness: 0.35
-          },
-          emphasis: { focus: "descendant" }
-        }]
+    async function updateDashboard(clanId) {
+      const cid = clanId || 0;
+      const data = await api(`/api/dashboard?clan_id=${cid}`);
+      const M = data.gender.M || 0, F = data.gender.F || 0, U = data.gender.U || 0;
+      const total = M + F + U;
+      $("chart-clan-label").textContent = cid ? `${currentClanName(cid)} · 共 ${total} 人` : `全库统计 · 共 ${total} 人`;
+      if (!window.echarts || !pieChart) return renderPieFallback(M,F,U,total);
+      pieChart.setOption({
+        tooltip:{trigger:"item", formatter:p=>`${p.name}<br>${p.value} 人 (${p.percent.toFixed(2)}%)`},
+        legend:{show:false},
+        series:[{type:"pie", radius:["38%","65%"], label:{show:true,fontSize:11,formatter:p=>`${p.name}\\n${p.value}人\\n${p.percent.toFixed(2)}%`}, data:[
+          {value:M,name:"男",itemStyle:{color:"#2563eb"}},
+          {value:F,name:"女",itemStyle:{color:"#10b981"}},
+          ...(U ? [{value:U,name:"未知",itemStyle:{color:"#94a3b8"}}] : [])
+        ]}]
       }, true);
-      setTimeout(() => { try { state.treeChart.resize(); } catch (e) {} }, 50);
+      setTimeout(()=>pieChart && pieChart.resize(), 50);
+    }
+    function renderPieFallback(M,F,U,total) {
+      const safe = Math.max(1,total);
+      const m = M / safe * 360, f = m + F / safe * 360;
+      $("stats-chart").innerHTML = `<div style="height:130px;display:flex;align-items:center;justify-content:center;gap:12px;"><div style="width:100px;height:100px;border-radius:50%;background:conic-gradient(#2563eb 0deg ${m}deg,#10b981 ${m}deg ${f}deg,#94a3b8 ${f}deg 360deg);"></div><div style="font-size:12px;color:#64748b;line-height:1.8">男 ${M}<br>女 ${F}<br>未知 ${U}</div></div>`;
     }
 
-    function toChartNode(node, depth) {
-      const children = node.children || [];
-      return {
-        name: node.name || `#${node.member_id}`,
-        member_id: node.member_id,
-        generation: node.generation_num,
-        birth_year: node.birth_year,
-        collapsed: depth >= 3 && children.length > 0,
-        itemStyle: { color: node.gender === "F" ? "#ec4899" : (node.gender === "U" ? "#94a3b8" : "#2563eb") },
-        children: children.map((child) => toChartNode(child, depth + 1))
+    async function loadClans() {
+      state.clans = await api("/api/clans");
+      renderClanList();
+      fillClanSelects();
+    }
+    function currentClanName(id) {
+      const c = state.clans.find(x => Number(x.clan_id) === Number(id));
+      return c ? (c.title || c.surname || `族谱 ${id}`) : `族谱 ${id}`;
+    }
+    function fillClanSelects() {
+      const options = state.clans.map(c => `<option value="${c.clan_id}">${esc(c.title || c.clan_id)}</option>`).join("");
+      ["member_clan","q-longevity-clan"].forEach(id => { if ($(id)) $(id).innerHTML = options; });
+      ["q-singles-clan","q-early-clan"].forEach(id => { if ($(id)) $(id).innerHTML = `<option value="0">全部族谱</option>${options}`; });
+    }
+
+    function resetSearchPanel() {
+      const msg = $("search-msg"), results = $("search-results");
+      if (msg) {
+        msg.style.color = "#64748b";
+        msg.textContent = "请输入姓名或编号后查询";
+      }
+      if (results) results.innerHTML = "";
+    }
+
+    async function search() {
+      const msg = $("search-msg"), results = $("search-results");
+      const q = $("nameInput").value.trim();
+      if (!q) {
+        resetSearchPanel();
+        return;
+      }
+      msg.style.color = "#64748b";
+      msg.textContent = "查询中...";
+      try {
+        const perf = $("perfModeToggle").checked;
+        const data = await api(`/api/members/search-performance?clan_id=0&q=${encodeURIComponent(q)}&performance_mode=${perf}`);
+        const found = data.ok && Number(data.count || 0) > 0;
+        msg.style.color = found ? "var(--success)" : "var(--danger)";
+        msg.textContent = `${found ? "搜索成功" : "搜索失败，未检索到对象"} | ${data.mode === "performance" ? "性能模式/索引启用" : "普通模式/索引关闭"} | 用时 ${data.elapsed_ms} ms | 内存 ${data.memory_kb} KB | 结果 ${data.count} 条${data.error ? " | " + data.error : ""}`;
+        results.innerHTML = found
+          ? (data.rows || []).map(m => renderMemberItem(m)).join("")
+          : "<div class='notice' style='color:var(--danger)'>没有检索到对象</div>";
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = "查询失败：" + e.message;
+        results.innerHTML = "";
+      }
+    }
+    async function runExplain() {
+      const msg = $("search-msg");
+      const q = $("nameInput").value.trim();
+      if (!q) {
+        resetSearchPanel();
+        return;
+      }
+      try {
+        msg.style.color = "#64748b";
+        msg.textContent = "正在生成 EXPLAIN...";
+        const result = await api(`/api/performance/explain?${actorParam()}`, {
+          method:"POST",
+          body:JSON.stringify({q, clan_id:0, performance_mode:$("perfModeToggle").checked})
+        });
+        msg.style.color = "var(--success)";
+        msg.textContent = `EXPLAIN 已保存：${result.output_file}`;
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
+      }
+    }
+    function renderMemberItem(m) {
+      return `<div class="member-item">
+        <div class="member-item-left" onclick="loadMemberTree(${m.member_id}, ${m.clan_id})">
+          <strong>${esc(m.name)}</strong>
+          <small style="margin-left:8px;color:#94a3b8;">#${m.member_id} · 族谱 ${m.clan_id} · 第${m.generation_num || "?"}代</small>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center;">
+          <button class="btn-sm" onclick="loadMemberTree(${m.member_id}, ${m.clan_id})">查看</button>
+          <button class="btn-sm" style="background:#7c3aed" onclick="openDetail(${m.member_id})">详情</button>
+          <button class="btn-sm" onclick="openEditMember(${m.member_id})">编辑</button>
+          <button class="btn-danger" onclick="deleteMember(${m.member_id})">删除</button>
+        </div>
+      </div>`;
+    }
+
+    async function loadMemberTree(memberId, clanId) {
+      state.currentClanId = Number(clanId || 0);
+      state.currentTreeMemberId = memberId;
+      const perm = await api(`/api/clans/${state.currentClanId}/permission?${actorParam()}`);
+      state.currentPerm = perm;
+      await updateDashboard(state.currentClanId);
+      const detail = await api(`/api/members/${memberId}/detail`);
+      const ancestors = await api(`/api/members/${memberId}/ancestors`);
+      const treeData = buildAncestorHierarchy(detail.member, ancestors);
+      renderTree(treeData ? [treeData] : []);
+    }
+    function renderEmptyTree() {
+      if (window.echarts && myChart) {
+        myChart.dispose();
+        myChart = null;
+      }
+      $("chart-container").innerHTML = "<p class='notice' style='padding:18px'>点击左侧成员，右侧展示其祖先树。鼠标滚轮缩放，拖拽平移。</p>";
+    }
+    function buildAncestorHierarchy(member, ancestors) {
+      const byId = {};
+      [member].concat(ancestors || []).forEach(x => { if (x && x.member_id) byId[Number(x.member_id)] = x; });
+      const build = (item, seen=new Set()) => {
+        if (!item || seen.has(Number(item.member_id))) return null;
+        const next = new Set(seen); next.add(Number(item.member_id));
+        return {...item, children:[item.father_id, item.mother_id].map(id => id ? build(byId[Number(id)], next) : null).filter(Boolean)};
       };
+      return build(member);
+    }
+    function toChartNode(n) {
+      return {name:n.name || `#${n.member_id}`, member_id:n.member_id, generation:n.generation_num, birth_year:n.birth_year, itemStyle:{color:n.gender==="F" ? "#10b981" : n.gender==="U" ? "#94a3b8" : "#2563eb"}, children:(n.children || []).map(toChartNode)};
+    }
+    function renderTree(roots) {
+      if (!window.echarts) return;
+      if (!myChart || (myChart.isDisposed && myChart.isDisposed())) {
+        $("chart-container").innerHTML = "";
+        myChart = echarts.init($("chart-container"));
+      }
+      state.treeZoom = 1;
+      myChart.setOption({tooltip:{trigger:"item",triggerOn:"mousemove",formatter:p=>`<b>${esc(p.data.name)}</b><br>成员ID：${p.data.member_id || "-"}<br>世代：${p.data.generation || "-"}<br>生年：${p.data.birth_year || "-"}`}, series:[{type:"tree", data:roots.map(toChartNode), top:"8%", left:"12%", bottom:"8%", right:"12%", orient:"RL", roam:true, zoom:state.treeZoom, expandAndCollapse:true, initialTreeDepth:8, symbol:"circle", symbolSize:10, label:{position:"right", align:"left", verticalAlign:"middle", color:"#334155", backgroundColor:"rgba(255,255,255,.86)", borderColor:"#dbeafe", borderWidth:1, borderRadius:5, padding:[4,7]}, leaves:{label:{position:"left", align:"right"}}, lineStyle:{color:"#93c5fd", width:1.5, curveness:.35}, emphasis:{focus:"ancestor"}}]}, true);
+      myChart.off("click");
+      myChart.on("click", p => { if (p.data && p.data.member_id) openDetail(p.data.member_id); });
+      setTimeout(()=>myChart && myChart.resize(), 50);
+    }
+    function zoomTree(factor) {
+      if (!myChart) return;
+      state.treeZoom = Math.max(0.25, Math.min(3.5, state.treeZoom * factor));
+      myChart.setOption({series:[{zoom:state.treeZoom}]});
+    }
+    async function resetTreeView() {
+      if (state.currentTreeMemberId) {
+        await loadMemberTree(state.currentTreeMemberId, state.currentClanId);
+      } else {
+        renderEmptyTree();
+      }
     }
 
-    async function loadAncestors() {
-      const id = $("ancestorId").value;
-      if (!id) return;
-      const rows = await api(`/api/members/${id}/ancestors`);
-      $("ancestorResult").innerHTML = rows.map((member) => `<span class="chip">${member.name} · 向上 ${member.generations_above} 代</span>`).join("") || "<p class='notice'>未找到祖先记录</p>";
+    function switchTab(tab) {
+      const searchTab = tab === "search";
+      $("panel-search").style.display = searchTab ? "flex" : "none";
+      $("panel-relation").style.display = searchTab ? "none" : "flex";
+      $("tab-search").classList.toggle("active", searchTab);
+      $("tab-relation").classList.toggle("active", !searchTab);
+    }
+    async function queryRelation() {
+      const a = $("relIdA").value, b = $("relIdB").value;
+      if (!a || !b) return $("relation-msg").textContent = "请输入两个成员 ID";
+      try {
+        const data = await api(`/api/members/${a}/relationship?target_id=${b}`);
+        $("relation-msg").textContent = data.path.length ? "查询成功" : "未找到通路";
+        $("relation-result").innerHTML = data.path.map(m => `<span class="badge badge-collab">${esc(m.name)} #${m.member_id}</span>`).join(" → ");
+      } catch(e) { $("relation-msg").textContent = e.message; }
     }
 
-    async function loadRelationship() {
-      const source = $("sourceId").value;
-      const target = $("targetId").value;
-      if (!source || !target) return;
-      const data = await api(`/api/members/${source}/relationship?target_id=${target}`);
-      $("relationResult").innerHTML = data.path.map((member, index) => `${index ? "<span>→</span>" : ""}<span class="chip">${member.name}</span>`).join("") || "<p class='notice'>未找到通路</p>";
+    function toggleClanView() {
+      const open = $("clan-view").style.display !== "flex";
+      $("clan-view").style.display = open ? "flex" : "none";
+      $("search-view").style.display = open ? "none" : "flex";
+      $("user-view").style.display = "none";
+      if (open) loadClans();
+    }
+    function toggleUserView() {
+      const open = $("user-view").style.display !== "flex";
+      $("user-view").style.display = open ? "flex" : "none";
+      $("search-view").style.display = open ? "none" : "flex";
+      $("clan-view").style.display = "none";
+      if (open) loadUsers();
+    }
+    function renderClanList() {
+      $("clan-list").innerHTML = state.clans.map(c => {
+        const isOwner = c.creator_user_id === actorId();
+        return `<div class="clan-item">
+          <div style="min-width:0">
+            <strong>${esc(c.title)}</strong><div class="sub">#${c.clan_id} · 姓氏 ${esc(c.surname || "-")} · 创建者 ${esc(c.creator_user_id || "-")} · 协作者 ${c.collaborators || 0}</div>
+          </div>
+          <div style="display:flex;gap:4px;">
+            <button class="btn-sm" onclick="selectClan(${c.clan_id})">统计</button>
+            <button class="btn-violet" onclick="openCollabModal(${c.clan_id})" ${isOwner ? "" : "disabled"}>协作</button>
+            <button class="btn-sm" onclick="openClanModal(${c.clan_id})" ${isOwner ? "" : "disabled"}>编辑</button>
+            <button class="btn-danger" onclick="deleteClan(${c.clan_id})" ${isOwner ? "" : "disabled"}>删除</button>
+          </div>
+        </div>`;
+      }).join("") || "<div class='notice'>暂无族谱</div>";
+    }
+    async function selectClan(id) { state.currentClanId = id; await updateDashboard(id); renderEmptyTree(); }
+    function openClanModal(id) {
+      const c = id ? state.clans.find(x => Number(x.clan_id) === Number(id)) : null;
+      $("clan_id").value = c ? c.clan_id : "";
+      $("clan_title").value = c ? c.title || "" : "";
+      $("clan_surname").value = c ? c.surname || "" : "";
+      $("clanModalTitle").textContent = c ? `编辑族谱 #${c.clan_id}` : "新建族谱";
+      $("clanMsg").textContent = c ? `创建者：${c.creator_user_id}（不可修改）` : `创建者默认为当前登录用户：${actorId()}`;
+      openModal("clanModal");
+    }
+    async function submitClan() {
+      try {
+        const id = $("clan_id").value;
+        const payload = {title:$("clan_title").value, surname:$("clan_surname").value};
+        await api(id ? `/api/clans/${id}?${actorParam()}` : `/api/clans?${actorParam()}`, {method:id ? "PUT" : "POST", body:JSON.stringify(payload)});
+        closeModal("clanModal"); await loadClans(); await updateDashboard(state.currentClanId);
+      } catch(e) { $("clanMsg").textContent = e.message; }
+    }
+    async function deleteClan(id) {
+      if (!confirm(`确认删除族谱 #${id}？`)) return;
+      await api(`/api/clans/${id}?${actorParam()}`, {method:"DELETE"});
+      await loadClans(); await updateDashboard();
     }
 
     async function loadUsers() {
-      const users = await api("/api/users");
-      $("userRows").innerHTML = users.map((user) => `<tr><td>${user.id}</td><td>${user.user_id}</td><td>${user.username || ""}</td></tr>`).join("");
+      state.users = await api("/api/users");
+      $("user-list").innerHTML = state.users.map(u => `<div class="member-item">
+        <div class="member-item-left" onclick="openUserDetail(${u.id})">
+          <strong>${esc(u.username || u.user_id)}</strong>
+          <div class="sub">#${u.id} · 账号 ${esc(u.user_id)} · ${esc(formatDate(u.created_at))}</div>
+        </div>
+        <div style="display:flex;gap:4px;">
+          <button class="btn-sm" onclick="openUserDetail(${u.id})">详情</button>
+          <button class="btn-sm" onclick="openUserModal(${u.id})" ${actorId()==="admin" ? "" : "disabled"}>编辑</button>
+          <button class="btn-danger" onclick="deleteUser(${u.id})" ${actorId()==="admin" ? "" : "disabled"}>删除</button>
+        </div>
+      </div>`).join("") || "<div class='notice'>暂无用户</div>";
     }
-
-    async function inviteUser() {
+    function renderUserClanRows(rows, emptyText) {
+      if (!rows || !rows.length) return `<div class="notice">${emptyText}</div>`;
+      return rows.map(c => `<div class="clan-item">
+        <div style="min-width:0">
+          <strong>${esc(c.title)}</strong>
+          <div class="sub">#${c.clan_id} · 姓氏 ${esc(c.surname || "-")} · 创建者 ${esc(c.creator_user_id || "-")} · 协作者 ${c.collaborators || 0}</div>
+        </div>
+        <button class="btn-sm" onclick="closeModal('userDetailModal'); selectClan(${c.clan_id});">查看</button>
+      </div>`).join("");
+    }
+    async function openUserDetail(id) {
       try {
-        const data = await api("/api/invitations", { method: "POST", body: JSON.stringify({ clan_id: state.clanId, user_id: $("inviteUser").value }) });
-        $("inviteMessage").textContent = data.message;
-        await loadDashboard();
-      } catch (error) {
-        $("inviteMessage").textContent = error.message;
+        const data = await api(`/api/users/${id}/detail`);
+        const u = data.user || {};
+        $("userDetailTitle").textContent = `${u.username || u.user_id || "用户"} #${u.id}`;
+        $("userDetailBody").innerHTML = `
+          <div class="detail-grid">
+            <div>账号</div><div>${esc(u.user_id || "-")}</div>
+            <div>用户名</div><div>${esc(u.username || "-")}</div>
+            <div>数字 ID</div><div>${esc(u.id || "-")}</div>
+            <div>创建时间</div><div>${esc(formatDate(u.created_at))}</div>
+          </div>
+          <div class="detail-section-title">创建的族谱</div>
+          ${renderUserClanRows(data.owned_clans, "暂无创建的族谱")}
+          <div class="detail-section-title">协作族谱</div>
+          ${renderUserClanRows(data.collaborated_clans, "暂无协作族谱")}
+        `;
+        openModal("userDetailModal");
+      } catch(e) {
+        $("user-list").insertAdjacentHTML("afterbegin", `<div class="notice" style="color:var(--danger)">${esc(e.message)}</div>`);
       }
     }
+    function openUserModal(id) {
+      const u = id ? state.users.find(x => Number(x.id) === Number(id)) : null;
+      $("user_numeric_id").value = u ? u.id : "";
+      $("user_account").value = u ? u.user_id : "";
+      $("user_account").disabled = !!u;
+      $("user_name").value = u ? u.username || "" : "";
+      $("user_password").value = "";
+      $("userModalTitle").textContent = u ? `编辑用户 #${u.id}` : "新建用户";
+      $("userMsg").textContent = "";
+      openModal("userModal");
+    }
+    async function submitUser() {
+      if (actorId() !== "admin") return $("userMsg").textContent = "只有 admin 可以管理用户";
+      try {
+        const id = $("user_numeric_id").value;
+        const payload = {username:$("user_name").value};
+        if (!id) payload.user_id = $("user_account").value;
+        if ($("user_password").value) payload.password = $("user_password").value;
+        await api(id ? `/api/users/${id}?${actorParam()}` : `/api/users?${actorParam()}`, {method:id ? "PUT" : "POST", body:JSON.stringify(payload)});
+        closeModal("userModal"); await loadUsers();
+      } catch(e) { $("userMsg").textContent = e.message; }
+    }
+    async function deleteUser(id) {
+      if (actorId() !== "admin") return;
+      if (!confirm(`确认删除用户 #${id}？`)) return;
+      await api(`/api/users/${id}?${actorParam()}`, {method:"DELETE"});
+      await loadUsers();
+    }
+
+    async function openDetail(id) {
+      try {
+        const d = await api(`/api/members/${id}/detail`);
+        const m = d.member || {};
+        state.currentDetailMemberId = Number(m.member_id || id);
+        $("detailTitle").textContent = `${m.name || "成员"} #${m.member_id}`;
+        const photoUrl = `/api/members/${m.member_id}/photo?v=${encodeURIComponent(m.id_pic || "default")}`;
+        $("detailBody").innerHTML = `<div style="display:flex;gap:16px;align-items:flex-start;margin-bottom:12px;">
+          <img src="${photoUrl}" alt="成员照片" style="width:128px;height:128px;object-fit:cover;border-radius:8px;border:1px solid #e2e8f0;background:#f8fafc;">
+          <table style="flex:1"><tbody>
+          <tr><td>性别</td><td>${genderLabel(m.gender)}</td><td>族谱</td><td>${esc((d.clan && d.clan.title) || m.clan_id || "-")}</td></tr>
+          <tr><td>出生</td><td>${m.birth_year || "-"}</td><td>死亡</td><td>${m.death_year || "-"}</td></tr>
+          <tr><td>父亲</td><td>${d.father ? esc(d.father.name) + " #" + d.father.member_id : "-"}</td><td>母亲</td><td>${d.mother ? esc(d.mother.name) + " #" + d.mother.member_id : "-"}</td></tr>
+          <tr><td>简介</td><td colspan="3">${esc(m.bio || "")}</td></tr>
+        </tbody></table>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin:10px 0;">
+          <button class="btn-violet" onclick="exportCurrentMember()">导出该对象</button>
+          <span id="detailExportMsg" class="notice"></span>
+        </div>
+        <h4>婚姻关系</h4>
+        <div style="display:grid;grid-template-columns:1fr 1fr 110px auto;gap:6px;align-items:start;margin-bottom:8px;">
+          <input id="marriage_spouse_id" type="number" placeholder="配偶 ID" style="margin:0">
+          <input id="marriage_spouse_name" placeholder="或配偶姓名" style="margin:0">
+          <input id="marriage_year" type="number" placeholder="结婚年" style="margin:0">
+          <button class="btn-primary" onclick="addMarriageForDetail()">登记</button>
+        </div>
+        <div id="marriageMsg" class="notice"></div>
+        <div id="marriageList"></div>
+        <h4>配偶</h4>${chips(d.spouses || [])}<h4>子女</h4>${chips(d.children || [])}`;
+        openModal("detailModal");
+        await loadMarriageList(state.currentDetailMemberId);
+      } catch(e) { alert(e.message); }
+    }
+    function chips(rows) { return rows.length ? rows.map(x => `<span class="badge badge-collab" style="margin:3px;display:inline-block">${esc(x.name)} #${x.member_id}</span>`).join("") : "<div class='notice'>暂无记录</div>"; }
+    function genderLabel(g) { return g === "M" ? "男" : g === "F" ? "女" : "未知"; }
+
+    async function loadMarriageList(memberId) {
+      const list = $("marriageList");
+      if (!list) return;
+      try {
+        const rows = await api(`/api/members/${memberId}/marriages?${actorParam()}`);
+        list.innerHTML = rows.length ? rows.map(m => `
+          <div class="member-item">
+            <div>
+              <strong>${esc(m.spouse_name || "")}</strong>
+              <div class="sub">#${m.spouse_id} · 结婚 ${m.marry_year || "-"} · 离婚 ${m.divorce_year || "-"}</div>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center;">
+              <input id="divorce_${m.marriage_id}" type="number" placeholder="离婚年" value="${m.divorce_year || ""}" style="width:86px;margin:0;padding:5px;">
+              <button class="btn-sm" onclick="setDivorceYear(${m.marriage_id})">保存</button>
+              <button class="btn-danger" onclick="deleteMarriageRecord(${m.marriage_id})">删除</button>
+            </div>
+          </div>
+        `).join("") : "<div class='notice'>暂无婚姻记录</div>";
+      } catch(e) {
+        list.innerHTML = `<div class="notice" style="color:var(--danger)">${esc(e.message)}</div>`;
+      }
+    }
+    async function exportCurrentMember() {
+      const msg = $("detailExportMsg");
+      try {
+        msg.style.color = "#64748b";
+        msg.textContent = "正在导出...";
+        const result = await api(`/api/export/members/${state.currentDetailMemberId}?${actorParam()}`, {method:"POST"});
+        msg.style.color = "var(--success)";
+        msg.textContent = `导出成功：${result.output_dir}`;
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
+      }
+    }
+    async function addMarriageForDetail() {
+      const msg = $("marriageMsg");
+      const memberId = state.currentDetailMemberId;
+      const spouseId = num($("marriage_spouse_id").value);
+      const spouseName = $("marriage_spouse_name").value.trim();
+      if (!spouseId && !spouseName) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = "请输入配偶 ID 或配偶姓名";
+        return;
+      }
+      try {
+        msg.style.color = "#64748b";
+        msg.textContent = "正在登记...";
+        await api(`/api/marriages?${actorParam()}`, {
+          method:"POST",
+          body:JSON.stringify({member_id:memberId, spouse_id:spouseId, spouse_name:spouseName || null, marry_year:num($("marriage_year").value)})
+        });
+        msg.style.color = "var(--success)";
+        msg.textContent = "婚姻登记成功";
+        $("marriage_spouse_id").value = "";
+        $("marriage_spouse_name").value = "";
+        $("marriage_year").value = "";
+        await loadMarriageList(memberId);
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
+      }
+    }
+    async function setDivorceYear(marriageId) {
+      const msg = $("marriageMsg");
+      try {
+        await api(`/api/marriages/${marriageId}/divorce?${actorParam()}`, {
+          method:"PUT",
+          body:JSON.stringify({divorce_year:num($("divorce_" + marriageId).value)})
+        });
+        msg.style.color = "var(--success)";
+        msg.textContent = "离婚年份已更新";
+        await loadMarriageList(state.currentDetailMemberId);
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
+      }
+    }
+    async function deleteMarriageRecord(marriageId) {
+      if (!confirm(`确认删除婚姻记录 #${marriageId}？`)) return;
+      const msg = $("marriageMsg");
+      try {
+        await api(`/api/marriages/${marriageId}?${actorParam()}`, {method:"DELETE"});
+        msg.style.color = "var(--success)";
+        msg.textContent = "婚姻记录已删除";
+        await loadMarriageList(state.currentDetailMemberId);
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
+      }
+    }
+
+    async function openAddMember() {
+      $("memberModalTitle").textContent = "添加成员";
+      clearMemberForm();
+      fillClanSelects();
+      openModal("memberModal");
+    }
+    async function openEditMember(id) {
+      try {
+        const d = await api(`/api/members/${id}/detail`);
+        const m = d.member;
+        $("memberModalTitle").textContent = `编辑成员 #${id}`;
+        $("member_id").value = m.member_id;
+        $("member_clan").value = m.clan_id;
+        $("member_clan").disabled = true;
+        $("member_name").value = m.name || "";
+        $("member_gender").value = m.gender || "U";
+        $("member_birth").value = m.birth_year || "";
+        $("member_death").value = m.death_year || "";
+        $("member_father").value = m.father_id || "";
+        $("member_mother").value = m.mother_id || "";
+        $("member_generation").value = m.generation_num || "";
+        $("member_bio").value = m.bio || "";
+        $("memberMsg").textContent = "";
+        openModal("memberModal");
+      } catch(e) { alert(e.message); }
+    }
+    function clearMemberForm() {
+      ["member_id","member_name","member_birth","member_death","member_father","member_mother","member_generation","member_bio"].forEach(id => $(id).value = "");
+      $("member_gender").value = "U";
+      $("member_clan").disabled = false;
+      $("member_photo").value = "";
+      $("memberMsg").textContent = "";
+    }
+    async function submitMember() {
+      try {
+        const id = $("member_id").value;
+        const payload = {clan_id:Number($("member_clan").value), name:$("member_name").value, gender:$("member_gender").value, birth_year:num($("member_birth").value), death_year:num($("member_death").value), father_id:num($("member_father").value), mother_id:num($("member_mother").value), generation_num:num($("member_generation").value), bio:$("member_bio").value};
+        const saved = await api(id ? `/api/members/${id}?${actorParam()}` : `/api/members?${actorParam()}`, {method:id ? "PUT" : "POST", body:JSON.stringify(payload)});
+        const memberId = saved.member_id || id;
+        if ($("member_photo").files.length) {
+          const form = new FormData(); form.append("photo", $("member_photo").files[0]);
+          await api(`/api/members/${memberId}/photo?${actorParam()}`, {method:"POST", body:form});
+        }
+        closeModal("memberModal"); await search();
+      } catch(e) { $("memberMsg").textContent = e.message; }
+    }
+    async function deleteMember(id) {
+      if (!confirm(`确认删除成员 #${id}？`)) return;
+      await api(`/api/members/${id}?${actorParam()}`, {method:"DELETE"});
+      await search();
+      renderEmptyTree();
+    }
+
+    async function openCollabModal(clanId) {
+      $("collab_clan_id_label").textContent = clanId;
+      $("grantMsg").textContent = "";
+      openModal("collabModal");
+      await loadCollaborators(clanId);
+    }
+    async function loadCollaborators(clanId) {
+      const rows = await api(`/api/clans/${clanId}/collaborators`);
+      $("collabList").innerHTML = rows.map(u => `<div class="member-item"><div>${esc(u.user_id)} · ${esc(u.username || "")}</div><button class="btn-danger" onclick="revokeAccess(${clanId}, '${esc(u.user_id)}')">撤销</button></div>`).join("") || "<div class='notice'>暂无协作者</div>";
+    }
+    async function grantAccess() {
+      const clanId = Number($("collab_clan_id_label").textContent);
+      try {
+        await api(`/api/collaborations?${actorParam()}`, {method:"POST", body:JSON.stringify({clan_id:clanId, user_id:$("grant_user_input").value})});
+        $("grant_user_input").value = ""; $("grantMsg").textContent = "授权成功"; await loadCollaborators(clanId); await loadClans();
+      } catch(e) { $("grantMsg").textContent = e.message; }
+    }
+    async function revokeAccess(clanId, userId) {
+      await api(`/api/collaborations?${actorParam()}`, {method:"DELETE", body:JSON.stringify({clan_id:clanId, user_id:userId})});
+      await loadCollaborators(clanId); await loadClans();
+    }
+
+    function openImportModal() {
+      $("import_title").value = "";
+      $("import_surname").value = "";
+      $("import_csv").value = "";
+      $("importMsg").style.color = "#64748b";
+      $("importMsg").textContent = "";
+      openModal("importModal");
+    }
+    async function submitClanImport() {
+      const msg = $("importMsg");
+      const file = $("import_csv").files[0];
+      if (!file) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = "请选择 CSV 文件";
+        return;
+      }
+      if (!$("import_title").value.trim()) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = "请输入族谱标题";
+        return;
+      }
+      const form = new FormData();
+      form.append("csv_file", file);
+      form.append("title", $("import_title").value.trim());
+      form.append("surname", $("import_surname").value.trim());
+      form.append("current_user_id", actorId());
+      try {
+        msg.style.color = "#64748b";
+        msg.textContent = "正在导入...";
+        const result = await api("/api/import/clan-csv", {method:"POST", body:form});
+        msg.style.color = "var(--success)";
+        msg.textContent = `导入成功：族谱 #${result.clan_id}，成员 ${result.members} 人，婚姻 ${result.marriages} 条`;
+        await loadClans();
+        await updateDashboard();
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
+      }
+    }
+    async function submitGeneratedImport() {
+      if (actorId() !== "admin") {
+        $("importMsg").style.color = "var(--danger)";
+        $("importMsg").textContent = "只有 admin 可以导入生成脚本的整库数据";
+        return;
+      }
+      if (!confirm("确认清空现有族谱、成员、婚姻和协作数据，并导入 generate_data.py 生成的数据？")) return;
+      try {
+        $("importMsg").style.color = "#64748b";
+        $("importMsg").textContent = "正在导入生成数据...";
+        const result = await api(`/api/import/generated?${actorParam()}`, {method:"POST"});
+        $("importMsg").style.color = "var(--success)";
+        $("importMsg").textContent = `导入完成：${result.members_file || ""}`;
+        await loadClans();
+        await updateDashboard();
+        resetSearchPanel();
+        renderEmptyTree();
+      } catch(e) {
+        $("importMsg").style.color = "var(--danger)";
+        $("importMsg").textContent = e.message;
+      }
+    }
+    async function openExportModal() {
+      await loadClans();
+      $("exportMsg").style.color = "#64748b";
+      $("exportMsg").textContent = "";
+      $("exportClanList").innerHTML = state.clans.map(c => `
+        <label style="display:flex;gap:8px;align-items:center;margin:6px 0;color:#1e293b;">
+          <input type="checkbox" class="export-clan-check" value="${c.clan_id}" style="width:auto;margin:0">
+          <span>#${c.clan_id} ${esc(c.title || "")} · ${esc(c.surname || "-")}</span>
+        </label>
+      `).join("") || "<div class='notice'>暂无族谱可导出</div>";
+      openModal("exportModal");
+    }
+    async function submitClanExport() {
+      const ids = Array.from(document.querySelectorAll(".export-clan-check:checked")).map(x => Number(x.value));
+      const msg = $("exportMsg");
+      if (!ids.length) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = "请选择至少一个族谱";
+        return;
+      }
+      try {
+        msg.style.color = "#64748b";
+        msg.textContent = "正在导出...";
+        const result = await api(`/api/export/clans?${actorParam()}`, {method:"POST", body:JSON.stringify({clan_ids:ids})});
+        msg.style.color = "var(--success)";
+        msg.textContent = `导出成功：${result.output_dir}`;
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
+      }
+    }
+    async function submitDatabaseExport() {
+      const msg = $("exportMsg");
+      if (actorId() !== "admin") {
+        msg.style.color = "var(--danger)";
+        msg.textContent = "只有 admin 可以导出整个数据库";
+        return;
+      }
+      try {
+        msg.style.color = "#64748b";
+        msg.textContent = "正在导出整个数据库...";
+        const result = await api(`/api/export/database?${actorParam()}`, {method:"POST"});
+        msg.style.color = "var(--success)";
+        msg.textContent = `导出成功：${result.output_dir}`;
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
+      }
+    }
+
+    function openQueryModal() { fillClanSelects(); switchQueryTab("spouse"); openModal("queryModal"); }
+    function switchQueryTab(tab) {
+      ["spouse","ancestors","longevity","singles","early","descendants"].forEach(t => {
+        $("qp-" + t).style.display = t === tab ? "block" : "none";
+        $("qt-" + t).classList.toggle("active", t === tab);
+      });
+    }
+    function table(headers, rows, empty) {
+      if (!rows.length) return `<p class="notice">${empty}</p>`;
+      return `<table class="query-result-table"><thead><tr>${headers.map(h=>`<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${esc(c == null || c === "" ? "—" : c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    }
+    async function runQuery(type) {
+      const out = $("qr-" + type);
+      out.innerHTML = "<p class='notice'>查询中...</p>";
+      try {
+        let data;
+        if (type === "spouse") {
+          data = await api(`/api/query/spouse_children?member_id=${$("q-spouse-id").value}`);
+          out.innerHTML = "<h4>配偶</h4>" + table(["姓名","性别","出生年"], data.spouses.map(s=>[s.name, genderLabel(s.gender), s.birth_year]), "暂无配偶") + "<h4>子女</h4>" + table(["姓名","性别","出生年","世代"], data.children.map(c=>[c.name, genderLabel(c.gender), c.birth_year, c.generation_num]), "暂无子女");
+        } else if (type === "ancestors") {
+          data = await api(`/api/members/${$("q-ancestors-id").value}/ancestors`);
+          out.innerHTML = table(["姓名","性别","出生年","世代","距离"], data.map(r=>[r.name, genderLabel(r.gender), r.birth_year, r.generation_num, r.generations_above]), "无祖先数据");
+        } else if (type === "longevity") {
+          data = await api(`/api/query/longevity?clan_id=${$("q-longevity-clan").value}`);
+          out.innerHTML = table(["世代","平均寿命","人数"], data.map(r=>[r.generation_num, r.avg_lifespan, r.member_count]), "暂无数据");
+        } else if (type === "singles") {
+          const c = $("q-singles-clan").value;
+          data = await api(`/api/query/singles${Number(c) ? "?clan_id=" + c : ""}`);
+          out.innerHTML = table(["ID","姓名","出生年","年龄","族谱"], data.map(r=>[r.member_id, r.name, r.birth_year, r.age, r.clan_id]), "无符合条件成员");
+        } else if (type === "early") {
+          const c = $("q-early-clan").value;
+          data = await api(`/api/query/early_birth${Number(c) ? "?clan_id=" + c : ""}`);
+          out.innerHTML = table(["ID","姓名","族谱","世代","出生年","本代均值","提前"], data.map(r=>[r.member_id, r.name, r.clan_id, r.generation_num, r.birth_year, r.avg_birth_year, r.years_before_avg]), "无符合条件成员");
+        } else if (type === "descendants") {
+          const name = $("q-descendants-name").value.trim();
+          if (!name) {
+            out.innerHTML = "<p style='color:var(--danger);font-size:12px;'>请输入成员姓名</p>";
+            return;
+          }
+          data = await api(`/api/query/great_grandchildren?name=${encodeURIComponent(name)}`);
+          out.innerHTML = table(["ID","姓名","性别","世代","出生年"], data.map(r=>[r.member_id, r.name, genderLabel(r.gender), r.generation_num, r.birth_year]), "无第四代后代");
+        }
+      } catch(e) { out.innerHTML = `<p style="color:var(--danger);font-size:12px;">${esc(e.message)}</p>`; }
+    }
+
+    function openModal(id) { $(id).classList.add("active"); }
+    function closeModal(id) { $(id).classList.remove("active"); }
+    $("nameInput").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
   </script>
 </body>
-</html>"""
+</html>
+"""

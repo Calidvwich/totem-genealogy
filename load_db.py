@@ -1,4 +1,7 @@
 import os
+import base64
+import hashlib
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +12,19 @@ DATABASE = os.getenv("TOTEM_DATABASE", "genealogy")
 TSQL = os.getenv("TOTEM_TSQL", "/usr/local/totem/bin/tsql")
 TOTEM_PORT = os.getenv("TOTEM_PORT", "")
 TOTEM_USER = os.getenv("TOTEM_USER", "totem")
+PASSWORD_HASH_ITERATIONS = 150000
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_urlsafe(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    )
+    encoded = base64.b64encode(digest).decode("ascii").rstrip("=")
+    return "pbkdf2_sha256${}${}${}".format(PASSWORD_HASH_ITERATIONS, salt, encoded)
 
 
 def run_tsql(args):
@@ -37,12 +53,21 @@ def main() -> None:
     run_tsql(["-c", "DELETE FROM members;"])
     run_tsql(["-c", "DELETE FROM collaborations;"])
     run_tsql(["-c", "DELETE FROM genealogies;"])
-    run_tsql(["-c", "UPDATE users SET password_hash = '123456', username = '管理员' WHERE user_id = 'admin';"])
+    admin_hash = hash_password("123456")
+    test_hash = hash_password("123456")
+    run_tsql(["-c", "UPDATE users SET password_hash = '{}', username = '管理员' WHERE user_id = 'admin';".format(admin_hash)])
     run_tsql([
         "-c",
         "INSERT INTO users(id, user_id, password_hash, username) "
-        "SELECT 1, 'admin', '123456', '管理员' "
-        "WHERE NOT EXISTS (SELECT 1 FROM users WHERE user_id = 'admin');",
+        "SELECT 1, 'admin', '{}', '管理员' "
+        "WHERE NOT EXISTS (SELECT 1 FROM users WHERE user_id = 'admin');".format(admin_hash),
+    ])
+    run_tsql(["-c", "UPDATE users SET password_hash = '{}', username = '测试用户' WHERE user_id = 'test01';".format(test_hash)])
+    run_tsql([
+        "-c",
+        "INSERT INTO users(id, user_id, password_hash, username) "
+        "SELECT next_id, 'test01', '{}', '测试用户' FROM (SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM users) s "
+        "WHERE NOT EXISTS (SELECT 1 FROM users WHERE user_id = 'test01');".format(test_hash),
     ])
 
     copy_genealogies_sql = (

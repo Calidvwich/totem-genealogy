@@ -17,6 +17,7 @@
 ## 环境要求
 
 - WSL（Ubuntu 18.04 LTS 64位，推荐）
+- wsl -d Ubuntu-18.04
 - Totem 数据库已安装于 `/usr/local/totem`，版本 1.0
 - Python 3.12（通过 conda 管理）
 - `tsql` 和 `totem_dump` 可以直接在命令行中使用

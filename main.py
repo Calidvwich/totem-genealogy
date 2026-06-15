@@ -1,7 +1,13 @@
 ﻿import csv
+import base64
+import importlib.util
+import hmac
 import hashlib
 import os
+import secrets
 import subprocess
+import time
+import tracemalloc
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,9 +15,9 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -24,11 +30,48 @@ TSQL_BIN = os.getenv("TOTEM_TSQL", "/usr/local/totem/bin/tsql")
 TOTEM_PORT = os.getenv("TOTEM_PORT", "")
 TOTEM_USER = os.getenv("TOTEM_USER", "totem")
 USE_TOTEM = os.getenv("TOTEM_USE_DEMO", "1") not in {"1", "true", "TRUE", "yes"}
+PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = 150000
+DEFAULT_ADMIN_PASSWORD_HASH = (
+    "pbkdf2_sha256$150000$oIG0zKga4xpBMJ9KI7bAOg$3TjiTzurVc75Ql8+C5hQnSf7w5O9WK3UHcntJqJY6us"
+)
+MEMBER_PERFORMANCE_INDEXES = [
+    ("idx_members_clan", "CREATE INDEX idx_members_clan ON members(clan_id)"),
+    ("idx_members_clan_name", "CREATE INDEX idx_members_clan_name ON members(clan_id, name)"),
+    ("idx_members_father", "CREATE INDEX idx_members_father ON members(father_id)"),
+    ("idx_members_mother", "CREATE INDEX idx_members_mother ON members(mother_id)"),
+]
+MEMBER_INDEXES_TO_DROP = MEMBER_PERFORMANCE_INDEXES + [
+    ("idx_members_birth", ""),
+    ("idx_members_gender", ""),
+]
 
 
 class LoginRequest(BaseModel):
     user_id: str = Field(min_length=1)
     password: str = Field(min_length=1)
+
+
+class UserIn(BaseModel):
+    user_id: str = Field(min_length=4, max_length=20)
+    password: str = Field(min_length=1, max_length=72)
+    username: Optional[str] = Field(default="", max_length=50)
+
+
+class UserUpdate(BaseModel):
+    password: Optional[str] = Field(default=None, min_length=1, max_length=72)
+    username: Optional[str] = Field(default=None, max_length=50)
+
+
+class GenealogyIn(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+    surname: Optional[str] = Field(default="", max_length=20)
+    creator_user_id: Optional[str] = Field(default="admin", min_length=1)
+
+
+class GenealogyUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    surname: Optional[str] = Field(default=None, max_length=20)
 
 
 class MemberIn(BaseModel):
@@ -57,6 +100,33 @@ class MemberUpdate(BaseModel):
 class InvitationIn(BaseModel):
     clan_id: int
     user_id: str = Field(min_length=1)
+
+
+class CollaborationIn(BaseModel):
+    clan_id: int
+    user_id: str = Field(min_length=1)
+
+
+class MarriageIn(BaseModel):
+    member_id: int
+    spouse_id: Optional[int] = None
+    spouse_name: Optional[str] = Field(default=None, max_length=50)
+    marry_year: Optional[int] = None
+    divorce_year: Optional[int] = None
+
+
+class MarriageDivorceIn(BaseModel):
+    divorce_year: Optional[int] = None
+
+
+class ExportClansRequest(BaseModel):
+    clan_ids: List[int]
+
+
+class PerformanceExplainRequest(BaseModel):
+    q: str = Field(min_length=1)
+    clan_id: int = 0
+    performance_mode: bool = False
 
 
 @dataclass
@@ -119,6 +189,41 @@ def sql_literal(value: Any) -> str:
     return f"'{escaped}'"
 
 
+def is_password_hash(value: str) -> bool:
+    return isinstance(value, str) and value.startswith(PASSWORD_HASH_ALGORITHM + "$")
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_urlsafe(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    )
+    encoded = base64.b64encode(digest).decode("ascii").rstrip("=")
+    return "{}${}${}${}".format(PASSWORD_HASH_ALGORITHM, PASSWORD_HASH_ITERATIONS, salt, encoded)
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    if not is_password_hash(stored_hash):
+        return hmac.compare_digest(password, stored_hash or "")
+    try:
+        algorithm, iterations, salt, expected = stored_hash.split("$", 3)
+        if algorithm != PASSWORD_HASH_ALGORITHM:
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(iterations),
+        )
+        actual = base64.b64encode(digest).decode("ascii").rstrip("=")
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+
 class TotemClient:
     def __init__(self, database: str = DATABASE_NAME, tsql_bin: str = TSQL_BIN, port: str = TOTEM_PORT, user: str = TOTEM_USER) -> None:
         self.database = database
@@ -175,13 +280,46 @@ class GenealogyService:
     def users(self) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
+    def user_detail(self, user_id: int) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def create_user(self, payload: UserIn) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def update_user(self, user_id: int, payload: UserUpdate) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def delete_user(self, user_id: int) -> None:
+        raise NotImplementedError
+
     def clans(self) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
-    def dashboard(self, clan_id: int) -> Dict[str, Any]:
+    def create_clan(self, payload: GenealogyIn) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def update_clan(self, clan_id: int, payload: GenealogyUpdate) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def delete_clan(self, clan_id: int) -> None:
+        raise NotImplementedError
+
+    def collaborators(self, clan_id: int) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def grant_collaboration(self, payload: CollaborationIn) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def revoke_collaboration(self, payload: CollaborationIn) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def dashboard(self, clan_id: Optional[int]) -> Dict[str, Any]:
         raise NotImplementedError
 
     def members(self, clan_id: int, q: str = "") -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def member_detail(self, member_id: int) -> Dict[str, Any]:
         raise NotImplementedError
 
     def create_member(self, payload: MemberIn) -> Dict[str, Any]:
@@ -190,7 +328,10 @@ class GenealogyService:
     def update_member(self, member_id: int, payload: MemberUpdate) -> Dict[str, Any]:
         raise NotImplementedError
 
-    def update_member_photo_hash(self, member_id: int, photo_hash: str) -> Dict[str, Any]:
+    def update_member_photo_hash(self, member_id: int, photo_hash: str, content: bytes = b"", content_type: str = "image/jpeg") -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def member_photo(self, member_id: int) -> Optional[Tuple[bytes, str]]:
         raise NotImplementedError
 
     def delete_member(self, member_id: int) -> None:
@@ -205,17 +346,34 @@ class GenealogyService:
     def relationship_path(self, source_id: int, target_id: int) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
+    def member_marriages(self, member_id: int) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def create_marriage(self, payload: MarriageIn) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def set_divorce(self, marriage_id: int, payload: MarriageDivorceIn) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def delete_marriage(self, marriage_id: int) -> None:
+        raise NotImplementedError
+
     def invite(self, payload: InvitationIn) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def clan_permission(self, clan_id: int, user_id: str) -> Dict[str, bool]:
         raise NotImplementedError
 
 
 class DemoGenealogyService(GenealogyService):
     def __init__(self) -> None:
         self._users = {
-            1: User(1, "admin", "123456", "管理员"),
-            2: User(2, "editor", "editor", "协作者"),
+            1: User(1, "admin", DEFAULT_ADMIN_PASSWORD_HASH, "管理员"),
+            2: User(2, "editor", hash_password("editor"), "协作者"),
+            3: User(3, "test01", hash_password("123456"), "测试用户"),
         }
         self._marriages: Set[Tuple[int, int]] = set()
+        self._photo_blobs: Dict[str, Tuple[bytes, str]] = {}
         self._clans = {1: Genealogy(1, "张氏示例族谱", "张", 1)}
         self._collaborations: Set[Tuple[int, int]] = {(1, 1)}
         self._members = {
@@ -233,18 +391,139 @@ class DemoGenealogyService(GenealogyService):
 
     def authenticate(self, user_id: str, password: str) -> Dict[str, Any]:
         for user in self._users.values():
-            if user.user_id == user_id and user.password_hash == password:
+            if user.user_id == user_id and verify_password(password, user.password_hash):
+                if not is_password_hash(user.password_hash):
+                    user.password_hash = hash_password(password)
                 return {"ok": True, "user": merge_dict(user.__dict__, {"password_hash": ""})}
         raise HTTPException(status_code=401, detail="账号或密码不正确")
 
     def users(self) -> List[Dict[str, Any]]:
         return [{k: v for k, v in user.__dict__.items() if k != "password_hash"} for user in self._users.values()]
 
-    def clans(self) -> List[Dict[str, Any]]:
-        return [clan.__dict__ for clan in self._clans.values()]
+    def user_detail(self, user_id: int) -> Dict[str, Any]:
+        user = self._users.get(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="未找到用户")
+        owned = []
+        collaborated = []
+        for clan in self.clans():
+            if int(clan.get("creator_id") or 0) == user_id:
+                owned.append(clan)
+            elif (int(clan.get("clan_id") or 0), user_id) in self._collaborations:
+                collaborated.append(clan)
+        return {
+            "user": {k: v for k, v in user.__dict__.items() if k != "password_hash"},
+            "owned_clans": owned,
+            "collaborated_clans": collaborated,
+        }
 
-    def dashboard(self, clan_id: int) -> Dict[str, Any]:
-        members = [m for m in self._members.values() if m.clan_id == clan_id]
+    def create_user(self, payload: UserIn) -> Dict[str, Any]:
+        if any(user.user_id == payload.user_id for user in self._users.values()):
+            raise HTTPException(status_code=409, detail="账号已存在")
+        user_id = max(self._users) + 1 if self._users else 1
+        user = User(user_id, payload.user_id, hash_password(payload.password), payload.username or payload.user_id)
+        self._users[user_id] = user
+        return {k: v for k, v in user.__dict__.items() if k != "password_hash"}
+
+    def update_user(self, user_id: int, payload: UserUpdate) -> Dict[str, Any]:
+        user = self._users.get(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="未找到用户")
+        changes = dump_model(payload, exclude_unset=True)
+        if "username" in changes:
+            user.username = changes["username"] or user.user_id
+        if "password" in changes and changes["password"]:
+            user.password_hash = hash_password(changes["password"])
+        return {k: v for k, v in user.__dict__.items() if k != "password_hash"}
+
+    def delete_user(self, user_id: int) -> None:
+        if user_id not in self._users:
+            raise HTTPException(status_code=404, detail="未找到用户")
+        if any(clan.creator_id == user_id for clan in self._clans.values()):
+            raise HTTPException(status_code=400, detail="该用户仍是族谱创建者，不能删除")
+        del self._users[user_id]
+        self._collaborations = {item for item in self._collaborations if item[1] != user_id}
+
+    def clans(self) -> List[Dict[str, Any]]:
+        rows = []
+        for clan in self._clans.values():
+            creator = self._users.get(clan.creator_id)
+            rows.append(merge_dict(clan.__dict__, {
+                "creator_user_id": creator.user_id if creator else "",
+                "creator_name": creator.username if creator else "",
+                "collaborators": len([item for item in self._collaborations if item[0] == clan.clan_id]),
+            }))
+        return rows
+
+    def create_clan(self, payload: GenealogyIn) -> Dict[str, Any]:
+        creator = next((user for user in self._users.values() if user.user_id == payload.creator_user_id), None)
+        if not creator:
+            raise HTTPException(status_code=404, detail="未找到创建者用户")
+        clan_id = max(self._clans) + 1 if self._clans else 1
+        clan = Genealogy(clan_id, payload.title, payload.surname or "", creator.id)
+        self._clans[clan_id] = clan
+        self._collaborations.add((clan_id, creator.id))
+        return self.clans()[-1]
+
+    def update_clan(self, clan_id: int, payload: GenealogyUpdate) -> Dict[str, Any]:
+        clan = self._clans.get(clan_id)
+        if not clan:
+            raise HTTPException(status_code=404, detail="未找到族谱")
+        changes = dump_model(payload, exclude_unset=True)
+        if "title" in changes and changes["title"] is not None:
+            clan.title = changes["title"]
+        if "surname" in changes:
+            clan.surname = changes["surname"] or ""
+        clan.revised_at = datetime.now().isoformat(timespec="seconds")
+        return next(row for row in self.clans() if row["clan_id"] == clan_id)
+
+    def delete_clan(self, clan_id: int) -> None:
+        if clan_id not in self._clans:
+            raise HTTPException(status_code=404, detail="未找到族谱")
+        member_ids = {member.member_id for member in self._members.values() if member.clan_id == clan_id}
+        self._members = {mid: member for mid, member in self._members.items() if member.clan_id != clan_id}
+        self._marriages = {pair for pair in self._marriages if pair[0] not in member_ids and pair[1] not in member_ids}
+        self._collaborations = {item for item in self._collaborations if item[0] != clan_id}
+        del self._clans[clan_id]
+
+    def collaborators(self, clan_id: int) -> List[Dict[str, Any]]:
+        if clan_id not in self._clans:
+            raise HTTPException(status_code=404, detail="未找到族谱")
+        rows = []
+        for current_clan_id, user_id in sorted(self._collaborations):
+            if current_clan_id != clan_id:
+                continue
+            user = self._users.get(user_id)
+            if user:
+                rows.append({"id": user.id, "user_id": user.user_id, "username": user.username})
+        return rows
+
+    def grant_collaboration(self, payload: CollaborationIn) -> Dict[str, Any]:
+        user = next((item for item in self._users.values() if item.user_id == payload.user_id), None)
+        if not user:
+            raise HTTPException(status_code=404, detail="未找到用户")
+        if payload.clan_id not in self._clans:
+            raise HTTPException(status_code=404, detail="未找到族谱")
+        self._collaborations.add((payload.clan_id, user.id))
+        return {"ok": True, "message": f"已授权 {user.username or user.user_id} 编辑族谱"}
+
+    def revoke_collaboration(self, payload: CollaborationIn) -> Dict[str, Any]:
+        user = next((item for item in self._users.values() if item.user_id == payload.user_id), None)
+        if not user:
+            raise HTTPException(status_code=404, detail="未找到用户")
+        clan = self._clans.get(payload.clan_id)
+        if not clan:
+            raise HTTPException(status_code=404, detail="未找到族谱")
+        if clan.creator_id == user.id:
+            raise HTTPException(status_code=400, detail="不能撤销创建者权限")
+        self._collaborations.discard((payload.clan_id, user.id))
+        return {"ok": True, "message": f"已撤销 {user.username or user.user_id} 的协作权限"}
+
+    def dashboard(self, clan_id: Optional[int]) -> Dict[str, Any]:
+        members = [
+            m for m in self._members.values()
+            if not clan_id or int(m.clan_id) == int(clan_id)
+        ]
         male = sum(1 for m in members if m.gender == "M")
         female = sum(1 for m in members if m.gender == "F")
         unknown = sum(1 for m in members if m.gender == "U")
@@ -254,7 +533,7 @@ class DemoGenealogyService(GenealogyService):
             "total_members": len(members),
             "gender": {"M": male, "F": female, "U": unknown},
             "oldest": public_member(oldest) if oldest else None,
-            "collaborators": len([c for c in self._collaborations if c[0] == clan_id]),
+            "collaborators": len([c for c in self._collaborations if not clan_id or c[0] == clan_id]),
         }
 
     def members(self, clan_id: int, q: str = "") -> List[Dict[str, Any]]:
@@ -264,9 +543,41 @@ class DemoGenealogyService(GenealogyService):
             rows = [m for m in rows if keyword in m.name.lower() or keyword in str(m.member_id)]
         return [public_member(m) for m in sorted(rows, key=lambda item: (item.generation_num or 999, item.member_id))]
 
+    def member_detail(self, member_id: int) -> Dict[str, Any]:
+        member = self._find_member(member_id)
+        clan = self._clans.get(member.clan_id)
+        father = self._members.get(member.father_id) if member.father_id else None
+        mother = self._members.get(member.mother_id) if member.mother_id else None
+        children = [
+            public_member(item)
+            for item in self._members.values()
+            if item.father_id == member_id or item.mother_id == member_id
+        ]
+        spouse_ids = set()
+        for child in children:
+            if child.get("father_id") == member_id and child.get("mother_id"):
+                spouse_ids.add(child["mother_id"])
+            if child.get("mother_id") == member_id and child.get("father_id"):
+                spouse_ids.add(child["father_id"])
+        for a_id, b_id in self._marriages:
+            if a_id == member_id:
+                spouse_ids.add(b_id)
+            if b_id == member_id:
+                spouse_ids.add(a_id)
+        spouses = [public_member(self._members[sid]) for sid in sorted(spouse_ids) if sid in self._members]
+        return {
+            "member": public_member(member),
+            "clan": clan.__dict__ if clan else None,
+            "father": public_member(father) if father else None,
+            "mother": public_member(mother) if mother else None,
+            "spouses": spouses,
+            "children": sorted(children, key=lambda item: int(item["member_id"])),
+        }
+
     def create_member(self, payload: MemberIn) -> Dict[str, Any]:
         self._validate_gender(payload.gender)
         self._validate_years(payload.birth_year, payload.death_year)
+        self._validate_demo_parent_links(payload.clan_id, None, payload.birth_year, payload.father_id, payload.mother_id)
         member_id = max(self._members) + 1 if self._members else 1
         member = Member(member_id=member_id, **dump_model(payload), id_pic=None)
         self._members[member_id] = member
@@ -282,6 +593,13 @@ class DemoGenealogyService(GenealogyService):
         death_year = changes.get("death_year", member.death_year)
         self._validate_years(birth_year, death_year)
         old_pair = self._parent_pair(member.father_id, member.mother_id)
+        self._validate_demo_parent_links(
+            member.clan_id,
+            member_id,
+            birth_year,
+            changes.get("father_id", member.father_id),
+            changes.get("mother_id", member.mother_id),
+        )
         for key, value in changes.items():
             setattr(member, key, value)
         new_pair = self._parent_pair(member.father_id, member.mother_id)
@@ -290,10 +608,18 @@ class DemoGenealogyService(GenealogyService):
             self._ensure_demo_marriage(member.father_id, member.mother_id)
         return public_member(member)
 
-    def update_member_photo_hash(self, member_id: int, photo_hash: str) -> Dict[str, Any]:
+    def update_member_photo_hash(self, member_id: int, photo_hash: str, content: bytes = b"", content_type: str = "image/jpeg") -> Dict[str, Any]:
         member = self._find_member(member_id)
         member.id_pic = photo_hash
+        if content:
+            self._photo_blobs[photo_hash] = (content, content_type or "image/jpeg")
         return public_member(member)
+
+    def member_photo(self, member_id: int) -> Optional[Tuple[bytes, str]]:
+        member = self._find_member(member_id)
+        if member.id_pic and member.id_pic in self._photo_blobs:
+            return self._photo_blobs[member.id_pic]
+        return None
 
     def delete_member(self, member_id: int) -> None:
         member_to_delete = self._find_member(member_id)
@@ -368,6 +694,57 @@ class DemoGenealogyService(GenealogyService):
                     queue.append(path + [next_id])
         return []
 
+    def member_marriages(self, member_id: int) -> List[Dict[str, Any]]:
+        self._find_member(member_id)
+        rows = []
+        for index, (a_id, b_id) in enumerate(sorted(self._marriages), start=1):
+            if member_id not in {a_id, b_id}:
+                continue
+            spouse_id = b_id if a_id == member_id else a_id
+            spouse = self._members.get(spouse_id)
+            if spouse:
+                rows.append({
+                    "marriage_id": index,
+                    "clan_id": spouse.clan_id,
+                    "spouse_id": spouse_id,
+                    "spouse_name": spouse.name,
+                    "marry_year": None,
+                    "divorce_year": None,
+                })
+        return rows
+
+    def create_marriage(self, payload: MarriageIn) -> Dict[str, Any]:
+        member = self._find_member(payload.member_id)
+        spouse_id = payload.spouse_id
+        if not spouse_id and payload.spouse_name:
+            matches = [item for item in self._members.values() if item.clan_id == member.clan_id and item.name == payload.spouse_name]
+            if len(matches) != 1:
+                raise HTTPException(status_code=400 if matches else 404, detail="配偶姓名不唯一或不存在，请使用成员 ID")
+            spouse_id = matches[0].member_id
+        if not spouse_id:
+            raise HTTPException(status_code=400, detail="需要 spouse_id 或 spouse_name")
+        spouse = self._find_member(spouse_id)
+        if spouse.clan_id != member.clan_id:
+            raise HTTPException(status_code=400, detail="配偶必须属于同一族谱")
+        if spouse.member_id == member.member_id:
+            raise HTTPException(status_code=400, detail="不能与自己建立婚姻")
+        pair = tuple(sorted((member.member_id, spouse.member_id)))
+        if pair in {tuple(sorted(item)) for item in self._marriages}:
+            raise HTTPException(status_code=400, detail="两人已有婚姻记录")
+        self._marriages.add((member.member_id, spouse.member_id))
+        return {"ok": True, "message": "婚姻登记成功"}
+
+    def set_divorce(self, marriage_id: int, payload: MarriageDivorceIn) -> Dict[str, Any]:
+        if marriage_id < 1 or marriage_id > len(self._marriages):
+            raise HTTPException(status_code=404, detail="婚姻记录不存在")
+        return {"ok": True, "message": "demo 模式已记录离婚操作"}
+
+    def delete_marriage(self, marriage_id: int) -> None:
+        pairs = sorted(self._marriages)
+        if marriage_id < 1 or marriage_id > len(pairs):
+            raise HTTPException(status_code=404, detail="婚姻记录不存在")
+        self._marriages.discard(pairs[marriage_id - 1])
+
     def invite(self, payload: InvitationIn) -> Dict[str, Any]:
         user = next((u for u in self._users.values() if u.user_id == payload.user_id), None)
         if not user:
@@ -376,6 +753,21 @@ class DemoGenealogyService(GenealogyService):
             raise HTTPException(status_code=404, detail="未找到该族谱")
         self._collaborations.add((payload.clan_id, user.id))
         return {"ok": True, "message": f"已邀请 {user.username} 编辑族谱"}
+
+    def clan_permission(self, clan_id: int, user_id: str) -> Dict[str, bool]:
+        user = next((item for item in self._users.values() if item.user_id == user_id), None)
+        clan = self._clans.get(clan_id)
+        is_owner = bool(user and clan and clan.creator_id == user.id)
+        can_edit = bool(is_owner or (user and (clan_id, user.id) in self._collaborations))
+        return {"can_edit": can_edit, "is_owner": is_owner}
+
+    def _require_edit(self, clan_id: int, actor_user_id: Optional[str]) -> None:
+        if actor_user_id and not self.clan_permission(clan_id, actor_user_id)["can_edit"]:
+            raise HTTPException(status_code=403, detail="当前用户没有编辑该族谱的权限")
+
+    def _require_owner(self, clan_id: int, actor_user_id: Optional[str]) -> None:
+        if actor_user_id and not self.clan_permission(clan_id, actor_user_id)["is_owner"]:
+            raise HTTPException(status_code=403, detail="只有族谱创建者可以执行该操作")
 
     def _find_member(self, member_id: int) -> Member:
         member = self._members.get(member_id)
@@ -415,6 +807,41 @@ class DemoGenealogyService(GenealogyService):
         if not has_common_child:
             self._marriages.discard(pair)
 
+    def _validate_demo_parent_links(
+        self,
+        clan_id: int,
+        member_id: Optional[int],
+        birth_year: Optional[int],
+        father_id: Optional[int],
+        mother_id: Optional[int],
+    ) -> None:
+        for parent_id, role, required_gender in (
+            (father_id, "父亲", "M"),
+            (mother_id, "母亲", "F"),
+        ):
+            if not parent_id:
+                continue
+            if member_id and int(parent_id) == int(member_id):
+                raise HTTPException(status_code=400, detail="不能把自己设为{}".format(role))
+            parent = self._members.get(int(parent_id))
+            if not parent:
+                raise HTTPException(status_code=404, detail="{}不存在".format(role))
+            if int(parent.clan_id) != int(clan_id):
+                raise HTTPException(status_code=400, detail="{}必须属于同一族谱".format(role))
+            if parent.gender != required_gender:
+                raise HTTPException(status_code=400, detail="{}性别不符合要求".format(role))
+            if birth_year and parent.birth_year and int(birth_year) <= int(parent.birth_year):
+                raise HTTPException(status_code=400, detail="成员出生年份必须晚于{}出生年份".format(role))
+            if birth_year and parent.death_year and int(birth_year) >= int(parent.death_year):
+                raise HTTPException(status_code=400, detail="成员出生年份必须早于{}死亡年份".format(role))
+        if father_id and mother_id and int(father_id) == int(mother_id):
+            raise HTTPException(status_code=400, detail="父亲和母亲不能是同一个人")
+        if member_id and birth_year:
+            for child in self._members.values():
+                if child.member_id != member_id and (child.father_id == member_id or child.mother_id == member_id):
+                    if child.birth_year and int(birth_year) >= int(child.birth_year):
+                        raise HTTPException(status_code=400, detail="成员出生年份必须早于子女出生年份")
+
 
 class TotemGenealogyService(DemoGenealogyService):
     def __init__(self) -> None:
@@ -424,12 +851,21 @@ class TotemGenealogyService(DemoGenealogyService):
     def authenticate(self, user_id: str, password: str) -> Dict[str, Any]:
         try:
             rows = self.client.query(
-                "SELECT id,user_id,username,created_at FROM users "
-                f"WHERE user_id = {sql_literal(user_id)} AND password_hash = {sql_literal(password)} LIMIT 1;"
+                "SELECT id,user_id,username,password_hash,created_at FROM users "
+                f"WHERE user_id = {sql_literal(user_id)} LIMIT 1;"
             )
-            if not rows:
+            if not rows or not verify_password(password, rows[0].get("password_hash") or ""):
                 raise HTTPException(status_code=401, detail="账号或密码不正确")
-            return {"ok": True, "user": rows[0]}
+            if not is_password_hash(rows[0].get("password_hash") or ""):
+                self.client.execute(
+                    "UPDATE users SET password_hash = {} WHERE id = {};".format(
+                        sql_literal(hash_password(password)),
+                        sql_literal(int(rows[0]["id"])),
+                    )
+                )
+            user = rows[0].copy()
+            user.pop("password_hash", None)
+            return {"ok": True, "user": user}
         except HTTPException:
             raise
         except Exception:
@@ -441,21 +877,266 @@ class TotemGenealogyService(DemoGenealogyService):
         except Exception:
             return super().users()
 
+    def user_detail(self, user_id: int) -> Dict[str, Any]:
+        try:
+            rows = self.client.query(
+                "SELECT id,user_id,username,created_at FROM users "
+                f"WHERE id = {sql_literal(user_id)} LIMIT 1;"
+            )
+            if not rows:
+                raise HTTPException(status_code=404, detail="未找到用户")
+            owned = self.client.query(
+                "SELECT g.clan_id,g.title,g.surname,g.revised_at,g.creator_id,u.user_id AS creator_user_id,"
+                "u.username AS creator_name,COALESCE(c.collaborators,0) AS collaborators "
+                "FROM genealogies g "
+                "LEFT JOIN users u ON u.id = g.creator_id "
+                "LEFT JOIN (SELECT clan_id, COUNT(*) AS collaborators FROM collaborations GROUP BY clan_id) c "
+                "ON c.clan_id = g.clan_id "
+                f"WHERE g.creator_id = {sql_literal(user_id)} ORDER BY g.clan_id;"
+            )
+            collaborated = self.client.query(
+                "SELECT g.clan_id,g.title,g.surname,g.revised_at,g.creator_id,u.user_id AS creator_user_id,"
+                "u.username AS creator_name,COALESCE(cc.collaborators,0) AS collaborators "
+                "FROM collaborations c "
+                "JOIN genealogies g ON g.clan_id = c.clan_id "
+                "LEFT JOIN users u ON u.id = g.creator_id "
+                "LEFT JOIN (SELECT clan_id, COUNT(*) AS collaborators FROM collaborations GROUP BY clan_id) cc "
+                "ON cc.clan_id = g.clan_id "
+                f"WHERE c.user_id = {sql_literal(user_id)} AND g.creator_id <> {sql_literal(user_id)} "
+                "ORDER BY g.clan_id;"
+            )
+            return {"user": rows[0], "owned_clans": owned, "collaborated_clans": collaborated}
+        except HTTPException:
+            raise
+        except Exception:
+            return super().user_detail(user_id)
+
+    def create_user(self, payload: UserIn) -> Dict[str, Any]:
+        try:
+            exists = self.client.query(f"SELECT 1 FROM users WHERE user_id = {sql_literal(payload.user_id)} LIMIT 1;")
+            if exists:
+                raise HTTPException(status_code=409, detail="账号已存在")
+            next_id_rows = self.client.query("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM users;")
+            user_id = int(next_id_rows[0]["id"]) if next_id_rows else 1
+            self.client.execute(
+                "INSERT INTO users(id,user_id,password_hash,username) "
+                f"VALUES ({sql_literal(user_id)}, {sql_literal(payload.user_id)}, "
+                f"{sql_literal(hash_password(payload.password))}, {sql_literal(payload.username or payload.user_id)});"
+            )
+            rows = self.client.query(
+                "SELECT id,user_id,username,created_at FROM users "
+                f"WHERE id = {sql_literal(user_id)} LIMIT 1;"
+            )
+            return rows[0]
+        except HTTPException:
+            raise
+        except Exception:
+            return super().create_user(payload)
+
+    def update_user(self, user_id: int, payload: UserUpdate) -> Dict[str, Any]:
+        try:
+            changes = dump_model(payload, exclude_unset=True)
+            if not changes:
+                rows = self.client.query(
+                    "SELECT id,user_id,username,created_at FROM users "
+                    f"WHERE id = {sql_literal(user_id)} LIMIT 1;"
+                )
+                if not rows:
+                    raise HTTPException(status_code=404, detail="未找到用户")
+                return rows[0]
+            assignments = []
+            if "username" in changes:
+                assignments.append(f"username = {sql_literal(changes['username'] or '')}")
+            if changes.get("password"):
+                assignments.append(f"password_hash = {sql_literal(hash_password(changes['password']))}")
+            if assignments:
+                self.client.execute(f"UPDATE users SET {', '.join(assignments)} WHERE id = {sql_literal(user_id)};")
+            rows = self.client.query(
+                "SELECT id,user_id,username,created_at FROM users "
+                f"WHERE id = {sql_literal(user_id)} LIMIT 1;"
+            )
+            if not rows:
+                raise HTTPException(status_code=404, detail="未找到用户")
+            return rows[0]
+        except HTTPException:
+            raise
+        except Exception:
+            return super().update_user(user_id, payload)
+
+    def delete_user(self, user_id: int) -> None:
+        try:
+            owned = self.client.query(
+                f"SELECT 1 FROM genealogies WHERE creator_id = {sql_literal(user_id)} LIMIT 1;"
+            )
+            if owned:
+                raise HTTPException(status_code=400, detail="该用户仍是族谱创建者，不能删除")
+            self.client.execute(f"DELETE FROM collaborations WHERE user_id = {sql_literal(user_id)};")
+            self.client.execute(f"DELETE FROM users WHERE id = {sql_literal(user_id)};")
+        except HTTPException:
+            raise
+        except Exception:
+            super().delete_user(user_id)
+
     def clans(self) -> List[Dict[str, Any]]:
         try:
-            return self.client.query("SELECT clan_id,title,surname,revised_at,creator_id FROM genealogies ORDER BY clan_id;")
+            return self.client.query(
+                "SELECT g.clan_id,g.title,g.surname,g.revised_at,g.creator_id,u.user_id AS creator_user_id,"
+                "u.username AS creator_name,COALESCE(c.collaborators,0) AS collaborators "
+                "FROM genealogies g LEFT JOIN users u ON u.id = g.creator_id "
+                "LEFT JOIN (SELECT clan_id, COUNT(*) AS collaborators FROM collaborations GROUP BY clan_id) c "
+                "ON c.clan_id = g.clan_id ORDER BY g.clan_id;"
+            )
         except Exception:
             return super().clans()
 
-    def dashboard(self, clan_id: int) -> Dict[str, Any]:
+    def create_clan(self, payload: GenealogyIn) -> Dict[str, Any]:
         try:
-            total = self.client.query(f"SELECT COUNT(*) AS total FROM members WHERE clan_id = {sql_literal(clan_id)};")
+            creator_rows = self.client.query(
+                f"SELECT id FROM users WHERE user_id = {sql_literal(payload.creator_user_id or 'admin')} LIMIT 1;"
+            )
+            if not creator_rows:
+                raise HTTPException(status_code=404, detail="未找到创建者用户")
+            creator_id = int(creator_rows[0]["id"])
+            next_id_rows = self.client.query("SELECT COALESCE(MAX(clan_id), 0) + 1 AS clan_id FROM genealogies;")
+            clan_id = int(next_id_rows[0]["clan_id"]) if next_id_rows else 1
+            self.client.execute(
+                "INSERT INTO genealogies(clan_id,title,surname,creator_id) "
+                f"VALUES ({sql_literal(clan_id)}, {sql_literal(payload.title)}, "
+                f"{sql_literal(payload.surname or '')}, {sql_literal(creator_id)});"
+            )
+            self.client.execute(
+                "INSERT INTO collaborations(clan_id,user_id) "
+                f"VALUES ({sql_literal(clan_id)}, {sql_literal(creator_id)});"
+            )
+            rows = [row for row in self.clans() if int(row["clan_id"]) == clan_id]
+            return rows[0] if rows else {"clan_id": clan_id, "title": payload.title, "surname": payload.surname or ""}
+        except HTTPException:
+            raise
+        except Exception:
+            return super().create_clan(payload)
+
+    def update_clan(self, clan_id: int, payload: GenealogyUpdate) -> Dict[str, Any]:
+        try:
+            changes = dump_model(payload, exclude_unset=True)
+            if changes:
+                assignments = []
+                if "title" in changes and changes["title"] is not None:
+                    assignments.append(f"title = {sql_literal(changes['title'])}")
+                if "surname" in changes:
+                    assignments.append(f"surname = {sql_literal(changes['surname'] or '')}")
+                assignments.append("revised_at = CURRENT_TIMESTAMP")
+                self.client.execute(
+                    f"UPDATE genealogies SET {', '.join(assignments)} WHERE clan_id = {sql_literal(clan_id)};"
+                )
+            rows = [row for row in self.clans() if int(row["clan_id"]) == clan_id]
+            if not rows:
+                raise HTTPException(status_code=404, detail="未找到族谱")
+            return rows[0]
+        except HTTPException:
+            raise
+        except Exception:
+            return super().update_clan(clan_id, payload)
+
+    def delete_clan(self, clan_id: int) -> None:
+        try:
+            member_rows = self.client.query(
+                f"SELECT member_id FROM members WHERE clan_id = {sql_literal(clan_id)};"
+            )
+            member_ids = [row["member_id"] for row in member_rows]
+            if member_ids:
+                id_list = ", ".join(sql_literal(int(member_id)) for member_id in member_ids)
+                self.client.execute(f"DELETE FROM marriages WHERE clan_id = {sql_literal(clan_id)} OR spouse_a_id IN ({id_list}) OR spouse_b_id IN ({id_list});")
+                self.client.execute(f"DELETE FROM members WHERE clan_id = {sql_literal(clan_id)};")
+            else:
+                self.client.execute(f"DELETE FROM marriages WHERE clan_id = {sql_literal(clan_id)};")
+            self.client.execute(f"DELETE FROM collaborations WHERE clan_id = {sql_literal(clan_id)};")
+            self.client.execute(f"DELETE FROM genealogies WHERE clan_id = {sql_literal(clan_id)};")
+        except Exception:
+            super().delete_clan(clan_id)
+
+    def collaborators(self, clan_id: int) -> List[Dict[str, Any]]:
+        try:
+            return self.client.query(
+                "SELECT u.id,u.user_id,u.username,u.created_at FROM collaborations c "
+                "JOIN users u ON u.id = c.user_id "
+                f"WHERE c.clan_id = {sql_literal(clan_id)} ORDER BY u.id;"
+            )
+        except Exception:
+            return super().collaborators(clan_id)
+
+    def grant_collaboration(self, payload: CollaborationIn) -> Dict[str, Any]:
+        try:
+            rows = self.client.query(f"SELECT id,username FROM users WHERE user_id = {sql_literal(payload.user_id)} LIMIT 1;")
+            if not rows:
+                raise HTTPException(status_code=404, detail="未找到用户")
+            user_id = int(rows[0]["id"])
+            exists = self.client.query(
+                f"SELECT 1 FROM collaborations WHERE clan_id = {sql_literal(payload.clan_id)} AND user_id = {sql_literal(user_id)} LIMIT 1;"
+            )
+            if not exists:
+                self.client.execute(
+                    f"INSERT INTO collaborations(clan_id,user_id) VALUES ({sql_literal(payload.clan_id)}, {sql_literal(user_id)});"
+                )
+            return {"ok": True, "message": f"已授权 {rows[0].get('username') or payload.user_id} 编辑族谱"}
+        except HTTPException:
+            raise
+        except Exception:
+            return super().grant_collaboration(payload)
+
+    def revoke_collaboration(self, payload: CollaborationIn) -> Dict[str, Any]:
+        try:
+            rows = self.client.query(f"SELECT id,username FROM users WHERE user_id = {sql_literal(payload.user_id)} LIMIT 1;")
+            if not rows:
+                raise HTTPException(status_code=404, detail="未找到用户")
+            user_id = int(rows[0]["id"])
+            owner = self.client.query(
+                f"SELECT 1 FROM genealogies WHERE clan_id = {sql_literal(payload.clan_id)} AND creator_id = {sql_literal(user_id)} LIMIT 1;"
+            )
+            if owner:
+                raise HTTPException(status_code=400, detail="不能撤销创建者权限")
+            self.client.execute(
+                f"DELETE FROM collaborations WHERE clan_id = {sql_literal(payload.clan_id)} AND user_id = {sql_literal(user_id)};"
+            )
+            return {"ok": True, "message": f"已撤销 {rows[0].get('username') or payload.user_id} 的协作权限"}
+        except HTTPException:
+            raise
+        except Exception:
+            return super().revoke_collaboration(payload)
+
+    def clan_permission(self, clan_id: int, user_id: str) -> Dict[str, bool]:
+        try:
+            rows = self.client.query(
+                "SELECT u.id FROM users u WHERE u.user_id = "
+                f"{sql_literal(user_id)} LIMIT 1;"
+            )
+            if not rows:
+                return {"can_edit": False, "is_owner": False}
+            numeric_user_id = int(rows[0]["id"])
+            owner = self.client.query(
+                "SELECT 1 FROM genealogies WHERE "
+                f"clan_id = {sql_literal(clan_id)} AND creator_id = {sql_literal(numeric_user_id)} LIMIT 1;"
+            )
+            is_owner = bool(owner)
+            if is_owner:
+                return {"can_edit": True, "is_owner": True}
+            collab = self.client.query(
+                "SELECT 1 FROM collaborations WHERE "
+                f"clan_id = {sql_literal(clan_id)} AND user_id = {sql_literal(numeric_user_id)} LIMIT 1;"
+            )
+            return {"can_edit": bool(collab), "is_owner": False}
+        except Exception:
+            return super().clan_permission(clan_id, user_id)
+
+    def dashboard(self, clan_id: Optional[int]) -> Dict[str, Any]:
+        try:
+            where = f"WHERE clan_id = {sql_literal(clan_id)}" if clan_id else ""
+            total = self.client.query(f"SELECT COUNT(*) AS total FROM members {where};")
             gender = self.client.query(
-                f"SELECT gender, COUNT(*) AS count FROM members WHERE clan_id = {sql_literal(clan_id)} GROUP BY gender;"
+                f"SELECT gender, COUNT(*) AS count FROM members {where} GROUP BY gender;"
             )
             oldest = self.client.query(
                 "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
-                f"FROM members WHERE clan_id = {sql_literal(clan_id)} AND birth_year IS NOT NULL ORDER BY birth_year ASC LIMIT 1;"
+                f"FROM members {where + ' AND' if where else 'WHERE'} birth_year IS NOT NULL ORDER BY birth_year ASC LIMIT 1;"
             )
             counts = {"M": 0, "F": 0, "U": 0}
             for row in gender:
@@ -465,7 +1146,7 @@ class TotemGenealogyService(DemoGenealogyService):
                 "total_members": int(total[0]["total"]) if total else 0,
                 "gender": counts,
                 "oldest": oldest[0] if oldest else None,
-                "collaborators": 0,
+                "collaborators": len(self.collaborators(clan_id)) if clan_id else 0,
             }
         except Exception:
             return super().dashboard(clan_id)
@@ -483,12 +1164,80 @@ class TotemGenealogyService(DemoGenealogyService):
         except Exception:
             return super().members(clan_id, q)
 
+    def member_detail(self, member_id: int) -> Dict[str, Any]:
+        try:
+            rows = self.client.query(
+                "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+                f"FROM members WHERE member_id = {sql_literal(member_id)} LIMIT 1;"
+            )
+            if not rows:
+                raise HTTPException(status_code=404, detail="未找到成员")
+            member = rows[0]
+            clan_id = self._optional_int(member.get("clan_id"))
+            clan_rows = self.client.query(
+                "SELECT g.clan_id,g.title,g.surname,g.revised_at,g.creator_id,u.user_id AS creator_user_id,u.username AS creator_name "
+                "FROM genealogies g LEFT JOIN users u ON u.id = g.creator_id "
+                f"WHERE g.clan_id = {sql_literal(clan_id)} LIMIT 1;"
+            )
+            relatives_by_id: Dict[int, Dict[str, Any]] = {}
+            parent_ids = [
+                self._optional_int(member.get("father_id")),
+                self._optional_int(member.get("mother_id")),
+            ]
+            for parent_id in [item for item in parent_ids if item]:
+                parent_rows = self.client.query(
+                    "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+                    f"FROM members WHERE member_id = {sql_literal(parent_id)} LIMIT 1;"
+                )
+                if parent_rows:
+                    relatives_by_id[parent_id] = parent_rows[0]
+            child_rows = self.client.query(
+                "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+                "FROM members WHERE "
+                f"father_id = {sql_literal(member_id)} OR mother_id = {sql_literal(member_id)} "
+                "ORDER BY generation_num, member_id;"
+            )
+            spouse_rows = self.client.query(
+                "SELECT DISTINCT s.member_id,s.clan_id,s.name,s.gender,s.birth_year,s.death_year,"
+                "s.father_id,s.mother_id,s.generation_num,s.bio,s.id_pic "
+                "FROM marriages ma JOIN members s ON "
+                "((ma.spouse_a_id = s.member_id AND ma.spouse_b_id = {mid}) "
+                "OR (ma.spouse_b_id = s.member_id AND ma.spouse_a_id = {mid})) "
+                "WHERE ma.clan_id = {cid} "
+                "ORDER BY s.member_id;".format(mid=sql_literal(member_id), cid=sql_literal(clan_id))
+            )
+            spouse_by_id = {int(row["member_id"]): row for row in spouse_rows}
+            for child in child_rows:
+                father_id = self._optional_int(child.get("father_id"))
+                mother_id = self._optional_int(child.get("mother_id"))
+                spouse_id = mother_id if father_id == member_id else father_id if mother_id == member_id else None
+                if spouse_id and spouse_id not in spouse_by_id:
+                    spouse_lookup = self.client.query(
+                        "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+                        f"FROM members WHERE member_id = {sql_literal(spouse_id)} LIMIT 1;"
+                    )
+                    if spouse_lookup:
+                        spouse_by_id[spouse_id] = spouse_lookup[0]
+            return {
+                "member": member,
+                "clan": clan_rows[0] if clan_rows else None,
+                "father": relatives_by_id.get(self._optional_int(member.get("father_id")) or -1),
+                "mother": relatives_by_id.get(self._optional_int(member.get("mother_id")) or -1),
+                "spouses": list(spouse_by_id.values()),
+                "children": child_rows,
+            }
+        except HTTPException:
+            raise
+        except Exception:
+            return super().member_detail(member_id)
+
     def create_member(self, payload: MemberIn) -> Dict[str, Any]:
         try:
             self._validate_gender(payload.gender)
             self._validate_years(payload.birth_year, payload.death_year)
             next_id_rows = self.client.query("SELECT COALESCE(MAX(member_id), 0) + 1 AS member_id FROM members;")
             member_id = int(next_id_rows[0]["member_id"]) if next_id_rows else 1
+            self._validate_parent_links(payload.clan_id, member_id, payload.birth_year, payload.father_id, payload.mother_id)
             values = [
                 member_id,
                 payload.clan_id,
@@ -512,6 +1261,8 @@ class TotemGenealogyService(DemoGenealogyService):
                 f"FROM members WHERE member_id = {sql_literal(member_id)};"
             )
             return rows[0]
+        except HTTPException:
+            raise
         except Exception:
             return super().create_member(payload)
 
@@ -525,6 +1276,20 @@ class TotemGenealogyService(DemoGenealogyService):
                 return rows[0] if rows else super().update_member(member_id, payload)
             before = self._member_parent_row(member_id)
             old_pair = self._parent_pair_from_row(before)
+            effective_clan_id = self._optional_int(before.get("clan_id")) or 1
+            effective_birth_year = changes.get("birth_year")
+            if effective_birth_year is None:
+                current = self.client.query(
+                    f"SELECT birth_year FROM members WHERE member_id = {sql_literal(member_id)} LIMIT 1;"
+                )
+                effective_birth_year = self._optional_int(current[0].get("birth_year")) if current else None
+            self._validate_parent_links(
+                effective_clan_id,
+                member_id,
+                effective_birth_year,
+                changes.get("father_id", self._optional_int(before.get("father_id"))),
+                changes.get("mother_id", self._optional_int(before.get("mother_id"))),
+            )
             assignments = [f"{key} = {sql_literal(value)}" for key, value in changes.items()]
             self.client.execute(f"UPDATE members SET {', '.join(assignments)} WHERE member_id = {sql_literal(member_id)};")
             rows = self.client.query(
@@ -547,8 +1312,32 @@ class TotemGenealogyService(DemoGenealogyService):
         except Exception:
             return super().update_member(member_id, payload)
 
-    def update_member_photo_hash(self, member_id: int, photo_hash: str) -> Dict[str, Any]:
+    def update_member_photo_hash(self, member_id: int, photo_hash: str, content: bytes = b"", content_type: str = "image/jpeg") -> Dict[str, Any]:
         try:
+            self._ensure_photo_table()
+            if content:
+                encoded = base64.b64encode(content).decode("ascii")
+                exists = self.client.query(
+                    f"SELECT 1 FROM member_photos WHERE photo_sha256 = {sql_literal(photo_hash)} LIMIT 1;"
+                )
+                if exists:
+                    self.client.execute(
+                        "UPDATE member_photos SET content_type = {ct}, content_base64 = {body}, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE photo_sha256 = {sha};".format(
+                            ct=sql_literal(content_type or "image/jpeg"),
+                            body=sql_literal(encoded),
+                            sha=sql_literal(photo_hash),
+                        )
+                    )
+                else:
+                    self.client.execute(
+                        "INSERT INTO member_photos(photo_sha256,content_type,content_base64) "
+                        "VALUES ({},{},{});".format(
+                            sql_literal(photo_hash),
+                            sql_literal(content_type or "image/jpeg"),
+                            sql_literal(encoded),
+                        )
+                    )
             self.client.execute(f"UPDATE members SET id_pic = {sql_literal(photo_hash)} WHERE member_id = {sql_literal(member_id)};")
             rows = self.client.query(
                 "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
@@ -560,7 +1349,22 @@ class TotemGenealogyService(DemoGenealogyService):
         except HTTPException:
             raise
         except Exception:
-            return super().update_member_photo_hash(member_id, photo_hash)
+            return super().update_member_photo_hash(member_id, photo_hash, content, content_type)
+
+    def member_photo(self, member_id: int) -> Optional[Tuple[bytes, str]]:
+        try:
+            self._ensure_photo_table()
+            rows = self.client.query(
+                "SELECT p.content_type,p.content_base64 FROM members m "
+                "JOIN member_photos p ON p.photo_sha256 = m.id_pic "
+                f"WHERE m.member_id = {sql_literal(member_id)} LIMIT 1;"
+            )
+            if not rows:
+                return None
+            content = base64.b64decode(rows[0].get("content_base64") or "")
+            return content, rows[0].get("content_type") or "image/jpeg"
+        except Exception:
+            return super().member_photo(member_id)
 
     def delete_member(self, member_id: int) -> None:
         try:
@@ -643,6 +1447,103 @@ class TotemGenealogyService(DemoGenealogyService):
         except Exception:
             return super().relationship_path(source_id, target_id)
 
+    def member_marriages(self, member_id: int) -> List[Dict[str, Any]]:
+        try:
+            rows = self.client.query(
+                "SELECT mg.marriage_id,mg.clan_id,mg.marry_year,mg.divorce_year,"
+                "CASE WHEN mg.spouse_a_id = {mid} THEN mg.spouse_b_id ELSE mg.spouse_a_id END AS spouse_id,"
+                "CASE WHEN mg.spouse_a_id = {mid} THEN mb.name ELSE ma.name END AS spouse_name "
+                "FROM marriages mg JOIN members ma ON ma.member_id = mg.spouse_a_id "
+                "JOIN members mb ON mb.member_id = mg.spouse_b_id "
+                "WHERE mg.spouse_a_id = {mid} OR mg.spouse_b_id = {mid} "
+                "ORDER BY mg.marry_year,mg.marriage_id;".format(mid=sql_literal(member_id))
+            )
+            return rows
+        except Exception:
+            return super().member_marriages(member_id)
+
+    def create_marriage(self, payload: MarriageIn) -> Dict[str, Any]:
+        try:
+            member = self._member_row(payload.member_id)
+            clan_id = self._optional_int(member.get("clan_id")) or 1
+            spouse_id = payload.spouse_id
+            if not spouse_id and payload.spouse_name:
+                matches = self.client.query(
+                    "SELECT member_id FROM members WHERE "
+                    f"clan_id = {sql_literal(clan_id)} AND name = {sql_literal(payload.spouse_name)};"
+                )
+                if not matches:
+                    raise HTTPException(status_code=404, detail="同族谱中未找到配偶")
+                if len(matches) > 1:
+                    raise HTTPException(status_code=400, detail="配偶姓名对应多个成员，请使用成员 ID")
+                spouse_id = self._optional_int(matches[0].get("member_id"))
+            if not spouse_id:
+                raise HTTPException(status_code=400, detail="需要 spouse_id 或 spouse_name")
+            spouse = self._member_row(int(spouse_id))
+            if self._optional_int(spouse.get("clan_id")) != clan_id:
+                raise HTTPException(status_code=400, detail="配偶必须属于同一族谱")
+            if int(spouse_id) == int(payload.member_id):
+                raise HTTPException(status_code=400, detail="不能与自己建立婚姻")
+            if payload.marry_year and payload.divorce_year and payload.divorce_year <= payload.marry_year:
+                raise HTTPException(status_code=400, detail="离婚年份必须晚于结婚年份")
+            self._validate_marriage_years(payload.member_id, int(spouse_id), payload.marry_year, payload.divorce_year)
+            self._ensure_no_marriage_overlap(payload.member_id, payload.marry_year, payload.divorce_year)
+            self._ensure_no_marriage_overlap(int(spouse_id), payload.marry_year, payload.divorce_year)
+            existing = self.client.query(
+                "SELECT 1 FROM marriages WHERE clan_id = {cid} AND "
+                "((spouse_a_id = {a} AND spouse_b_id = {b}) OR (spouse_a_id = {b} AND spouse_b_id = {a})) "
+                "AND divorce_year IS NULL LIMIT 1;".format(
+                    cid=sql_literal(clan_id),
+                    a=sql_literal(payload.member_id),
+                    b=sql_literal(int(spouse_id)),
+                )
+            )
+            if existing:
+                raise HTTPException(status_code=400, detail="两人已有有效婚姻记录")
+            next_id_rows = self.client.query("SELECT COALESCE(MAX(marriage_id), 0) + 1 AS marriage_id FROM marriages;")
+            marriage_id = int(next_id_rows[0]["marriage_id"]) if next_id_rows else 1
+            self.client.execute(
+                "INSERT INTO marriages(marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year) "
+                "VALUES ({},{},{},{},{},{});".format(
+                    sql_literal(marriage_id),
+                    sql_literal(clan_id),
+                    sql_literal(payload.member_id),
+                    sql_literal(int(spouse_id)),
+                    sql_literal(payload.marry_year),
+                    sql_literal(payload.divorce_year),
+                )
+            )
+            return {"ok": True, "marriage_id": marriage_id, "message": "婚姻登记成功"}
+        except HTTPException:
+            raise
+        except Exception:
+            return super().create_marriage(payload)
+
+    def set_divorce(self, marriage_id: int, payload: MarriageDivorceIn) -> Dict[str, Any]:
+        try:
+            row = self._marriage_row(marriage_id)
+            marry_year = self._optional_int(row.get("marry_year"))
+            if marry_year and payload.divorce_year and payload.divorce_year <= marry_year:
+                raise HTTPException(status_code=400, detail="离婚年份必须晚于结婚年份")
+            self.client.execute(
+                f"UPDATE marriages SET divorce_year = {sql_literal(payload.divorce_year)} "
+                f"WHERE marriage_id = {sql_literal(marriage_id)};"
+            )
+            return {"ok": True, "message": "离婚信息已更新"}
+        except HTTPException:
+            raise
+        except Exception:
+            return super().set_divorce(marriage_id, payload)
+
+    def delete_marriage(self, marriage_id: int) -> None:
+        try:
+            self._marriage_row(marriage_id)
+            self.client.execute(f"DELETE FROM marriages WHERE marriage_id = {sql_literal(marriage_id)};")
+        except HTTPException:
+            raise
+        except Exception:
+            super().delete_marriage(marriage_id)
+
     def invite(self, payload: InvitationIn) -> Dict[str, Any]:
         try:
             rows = self.client.query(f"SELECT id,username FROM users WHERE user_id = {sql_literal(payload.user_id)} LIMIT 1;")
@@ -667,6 +1568,117 @@ class TotemGenealogyService(DemoGenealogyService):
         if value in {None, "", "NULL"}:
             return None
         return int(value)
+
+    def _member_row(self, member_id: int) -> Dict[str, Any]:
+        rows = self.client.query(
+            "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+            f"FROM members WHERE member_id = {sql_literal(member_id)} LIMIT 1;"
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="未找到成员")
+        return rows[0]
+
+    def _ensure_photo_table(self) -> None:
+        try:
+            self.client.query("SELECT photo_sha256 FROM member_photos LIMIT 1;")
+            return
+        except Exception:
+            pass
+        self.client.execute(
+            "CREATE TABLE member_photos ("
+            "photo_sha256 VARCHAR(64) PRIMARY KEY,"
+            "content_type VARCHAR(100) NOT NULL,"
+            "content_base64 TEXT NOT NULL,"
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+            ");"
+        )
+
+    def _marriage_row(self, marriage_id: int) -> Dict[str, Any]:
+        rows = self.client.query(
+            "SELECT marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year "
+            f"FROM marriages WHERE marriage_id = {sql_literal(marriage_id)} LIMIT 1;"
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="婚姻记录不存在")
+        return rows[0]
+
+    def _validate_parent_links(
+        self,
+        clan_id: int,
+        member_id: Optional[int],
+        birth_year: Optional[int],
+        father_id: Optional[int],
+        mother_id: Optional[int],
+    ) -> None:
+        if father_id and mother_id and int(father_id) == int(mother_id):
+            raise HTTPException(status_code=400, detail="父亲和母亲不能是同一个人")
+        for parent_id, role, required_gender in (
+            (father_id, "父亲", "M"),
+            (mother_id, "母亲", "F"),
+        ):
+            if not parent_id:
+                continue
+            if member_id and int(parent_id) == int(member_id):
+                raise HTTPException(status_code=400, detail="不能把自己设为{}".format(role))
+            parent = self._member_row(int(parent_id))
+            if self._optional_int(parent.get("clan_id")) != int(clan_id):
+                raise HTTPException(status_code=400, detail="{}必须属于同一族谱".format(role))
+            if parent.get("gender") != required_gender:
+                raise HTTPException(status_code=400, detail="{}性别必须为{}".format(role, "男" if required_gender == "M" else "女"))
+            parent_birth = self._optional_int(parent.get("birth_year"))
+            parent_death = self._optional_int(parent.get("death_year"))
+            if birth_year and parent_birth and int(birth_year) <= parent_birth:
+                raise HTTPException(status_code=400, detail="成员出生年份必须晚于{}出生年份".format(role))
+            if birth_year and parent_death and int(birth_year) >= parent_death:
+                raise HTTPException(status_code=400, detail="成员出生年份必须早于{}死亡年份".format(role))
+        if member_id and birth_year:
+            children = self.client.query(
+                "SELECT birth_year FROM members WHERE "
+                f"(father_id = {sql_literal(member_id)} OR mother_id = {sql_literal(member_id)}) "
+                "AND birth_year IS NOT NULL;"
+            )
+            for child in children:
+                child_birth = self._optional_int(child.get("birth_year"))
+                if child_birth and int(birth_year) >= child_birth:
+                    raise HTTPException(status_code=400, detail="成员出生年份必须早于子女出生年份")
+
+    def _interval_end(self, year: Optional[int]) -> int:
+        return int(year) if year else 9999
+
+    def _validate_marriage_years(self, member_id: int, spouse_id: int, marry_year: Optional[int], divorce_year: Optional[int]) -> None:
+        for current_id, role in ((member_id, "成员"), (spouse_id, "配偶")):
+            row = self._member_row(current_id)
+            birth = self._optional_int(row.get("birth_year"))
+            death = self._optional_int(row.get("death_year"))
+            if marry_year and birth and marry_year <= birth:
+                raise HTTPException(status_code=400, detail="结婚年份必须晚于{}出生年份".format(role))
+            if marry_year and death and marry_year >= death:
+                raise HTTPException(status_code=400, detail="结婚年份必须早于{}死亡年份".format(role))
+            if divorce_year and death and divorce_year >= death:
+                raise HTTPException(status_code=400, detail="离婚年份必须早于{}死亡年份".format(role))
+
+    def _ensure_no_marriage_overlap(
+        self,
+        member_id: int,
+        start_year: Optional[int],
+        end_year: Optional[int],
+        ignore_marriage_id: Optional[int] = None,
+    ) -> None:
+        if not start_year:
+            start_year = 0
+        rows = self.client.query(
+            "SELECT marriage_id,marry_year,divorce_year FROM marriages WHERE "
+            f"(spouse_a_id = {sql_literal(member_id)} OR spouse_b_id = {sql_literal(member_id)});"
+        )
+        for row in rows:
+            current_marriage_id = self._optional_int(row.get("marriage_id"))
+            if ignore_marriage_id and current_marriage_id == ignore_marriage_id:
+                continue
+            old_start = self._optional_int(row.get("marry_year")) or 0
+            old_end = self._optional_int(row.get("divorce_year"))
+            if start_year < self._interval_end(old_end) and self._interval_end(end_year) > old_start:
+                raise HTTPException(status_code=400, detail="该成员在该时间段已有婚姻关系")
 
     def _member_parent_row(self, member_id: int) -> Dict[str, Any]:
         rows = self.client.query(
@@ -777,6 +1789,278 @@ app.add_middleware(
 app.mount("/resources", StaticFiles(directory=APP_DIR / "resources"), name="resources")
 
 
+def load_script_module(filename: str, module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, APP_DIR / filename)
+    if spec is None or spec.loader is None:
+        raise HTTPException(status_code=500, detail="无法加载脚本 {}".format(filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def import_tools():
+    return load_script_module("import.py", "genealogy_import_tools")
+
+
+def export_tools():
+    return load_script_module("export.py", "genealogy_export_tools")
+
+
+def ensure_output_dir(*parts: str) -> Path:
+    output_dir = APP_DIR / "output"
+    for part in parts:
+        output_dir = output_dir / part
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+for output_part in ("import", "export", "performance-test"):
+    ensure_output_dir(output_part)
+
+
+def require_actor(current_user_id: Optional[str]) -> str:
+    if not current_user_id:
+        raise HTTPException(status_code=401, detail="缺少当前登录用户")
+    return current_user_id
+
+
+def require_admin(current_user_id: Optional[str]) -> str:
+    actor = require_actor(current_user_id)
+    if actor != "admin":
+        raise HTTPException(status_code=403, detail="只有 admin 可以管理用户")
+    return actor
+
+
+def require_clan_edit(clan_id: int, current_user_id: Optional[str]) -> None:
+    actor = require_actor(current_user_id)
+    if not service.clan_permission(clan_id, actor)["can_edit"]:
+        raise HTTPException(status_code=403, detail="当前用户没有编辑该族谱的权限")
+
+
+def require_clan_owner(clan_id: int, current_user_id: Optional[str]) -> None:
+    actor = require_actor(current_user_id)
+    if not service.clan_permission(clan_id, actor)["is_owner"]:
+        raise HTTPException(status_code=403, detail="只有族谱创建者可以执行该操作")
+
+
+def member_clan_id(member_id: int) -> int:
+    detail = service.member_detail(member_id)
+    return int(detail["member"]["clan_id"])
+
+
+def marriage_clan_id(marriage_id: int) -> int:
+    for row in all_marriages_for_member(0):
+        if int(row["marriage_id"]) == int(marriage_id):
+            return int(row["clan_id"])
+    if hasattr(service, "client"):
+        rows = service.client.query(  # type: ignore[attr-defined]
+            f"SELECT clan_id FROM marriages WHERE marriage_id = {sql_literal(marriage_id)} LIMIT 1;"
+        )
+        if rows:
+            return int(rows[0]["clan_id"])
+    if not hasattr(service, "client"):
+        return 1
+    raise HTTPException(status_code=404, detail="婚姻记录不存在")
+
+
+def all_marriages_for_member(member_id: int) -> List[Dict[str, Any]]:
+    if hasattr(service, "member_marriages"):
+        try:
+            return service.member_marriages(member_id)
+        except Exception:
+            return []
+    return []
+
+
+def all_member_rows(clan_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    if hasattr(service, "client"):
+        try:
+            where = f"WHERE clan_id = {sql_literal(clan_id)}" if clan_id else ""
+            return service.client.query(
+                "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+                f"FROM members {where} ORDER BY clan_id,generation_num,member_id;"
+            )
+        except Exception:
+            if not hasattr(service, "_members"):
+                raise
+    rows = []
+    for member in service._members.values():  # type: ignore[attr-defined]
+        if clan_id and int(member.clan_id) != int(clan_id):
+            continue
+        rows.append(public_member(member))
+    return sorted(rows, key=lambda item: (int(item["clan_id"]), int(item.get("generation_num") or 999), int(item["member_id"])))
+
+
+def member_rows_by_name(name: str) -> List[Dict[str, Any]]:
+    return [row for row in all_member_rows() if row.get("name") == name]
+
+
+def optional_row_int(row: Dict[str, Any], key: str) -> Optional[int]:
+    value = row.get(key)
+    if value in {None, "", "NULL"}:
+        return None
+    return int(value)
+
+
+def row_age(row: Dict[str, Any]) -> Optional[int]:
+    birth_year = optional_row_int(row, "birth_year")
+    if not birth_year:
+        return None
+    death_year = optional_row_int(row, "death_year") or datetime.now().year
+    return death_year - birth_year
+
+
+def configure_member_indexes(performance_mode: bool) -> Dict[str, Any]:
+    mode = "performance" if performance_mode else "normal"
+    result = {"mode": mode, "enabled": performance_mode, "indexes": [], "errors": []}
+    if not hasattr(service, "client"):
+        result["message"] = "demo 模式不操作真实数据库索引"
+        return result
+
+    client = service.client  # type: ignore[attr-defined]
+    if performance_mode:
+        for index_name, create_sql in MEMBER_PERFORMANCE_INDEXES:
+            try:
+                client.execute(create_sql + ";")
+                result["indexes"].append(index_name)
+            except Exception as exc:
+                message = str(exc)
+                if "already exists" in message or "已存在" in message:
+                    result["indexes"].append(index_name)
+                else:
+                    result["errors"].append(f"{index_name}: {message}")
+    else:
+        for index_name, _ in reversed(MEMBER_INDEXES_TO_DROP):
+            try:
+                client.execute(f"DROP INDEX {index_name};")
+            except Exception as exc:
+                message = str(exc)
+                if "does not exist" not in message and "不存在" not in message:
+                    result["errors"].append(f"{index_name}: {message}")
+    return result
+
+
+def measured_member_search(clan_id: int, q: str, performance_mode: bool) -> Dict[str, Any]:
+    keyword = q.strip().lower()
+    if not keyword:
+        mode = "performance" if performance_mode else "normal"
+        return {
+            "ok": False,
+            "mode": mode,
+            "index_status": {
+                "mode": mode,
+                "enabled": performance_mode,
+                "indexes": [],
+                "errors": [],
+                "message": "空查询未执行",
+            },
+            "elapsed_ms": 0,
+            "memory_kb": 0,
+            "count": 0,
+            "rows": [],
+            "error": "请输入姓名或编号后查询",
+        }
+    index_status = configure_member_indexes(performance_mode)
+    tracemalloc.start()
+    started = time.perf_counter()
+    try:
+        if clan_id:
+            rows = service.members(clan_id, q)
+        else:
+            rows = all_member_rows()
+            rows = [
+                row for row in rows
+                if keyword in str(row.get("name", "")).lower()
+                or keyword in str(row.get("member_id", ""))
+            ]
+            rows = rows[:200]
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _, peak = tracemalloc.get_traced_memory()
+        return {
+            "ok": True,
+            "mode": index_status["mode"],
+            "index_status": index_status,
+            "elapsed_ms": round(elapsed_ms, 3),
+            "memory_kb": round(peak / 1024, 2),
+            "count": len(rows),
+            "rows": rows,
+        }
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _, peak = tracemalloc.get_traced_memory()
+        return {
+            "ok": False,
+            "mode": index_status["mode"],
+            "index_status": index_status,
+            "elapsed_ms": round(elapsed_ms, 3),
+            "memory_kb": round(peak / 1024, 2),
+            "count": 0,
+            "rows": [],
+            "error": str(exc),
+        }
+    finally:
+        tracemalloc.stop()
+
+
+def run_tsql_text(args: List[str], timeout: int = 120) -> str:
+    command = [TSQL_BIN]
+    if TOTEM_PORT:
+        command.extend(["-p", TOTEM_PORT])
+    if TOTEM_USER:
+        command.extend(["-U", TOTEM_USER])
+    command.extend(["-d", DATABASE_NAME])
+    command.extend(args)
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        check=False,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
+    return completed.stdout
+
+
+def write_search_explain(q: str, clan_id: int = 0, performance_mode: bool = False) -> Dict[str, Any]:
+    keyword = q.strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="请输入搜索关键词")
+    index_status = configure_member_indexes(performance_mode)
+    conditions = []
+    if clan_id:
+        conditions.append("clan_id = {}".format(sql_literal(clan_id)))
+    conditions.append("(name LIKE {} OR CAST(member_id AS TEXT) LIKE {})".format(
+        sql_literal("%" + keyword + "%"),
+        sql_literal("%" + keyword + "%"),
+    ))
+    sql = (
+        "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+        "FROM members WHERE {} ORDER BY clan_id,generation_num,member_id LIMIT 200".format(" AND ".join(conditions))
+    )
+    explain_sql = "EXPLAIN ANALYZE " + sql + ";"
+    output = run_tsql_text(["-c", explain_sql], timeout=180)
+    target_dir = ensure_output_dir("performance-test")
+    file_path = target_dir / (datetime.now().strftime("%Y%m%d-%H%M%S") + ".txt")
+    content = "\n".join([
+        "Totem genealogy performance EXPLAIN",
+        "generated_at: {}".format(datetime.now().isoformat(timespec="seconds")),
+        "mode: {}".format(index_status.get("mode")),
+        "index_status: {}".format(index_status),
+        "keyword: {}".format(keyword),
+        "clan_id: {}".format(clan_id or "all"),
+        "",
+        "SQL:",
+        sql + ";",
+        "",
+        "EXPLAIN ANALYZE:",
+        output,
+    ])
+    file_path.write_text(content, encoding="utf-8")
+    return {"ok": True, "output_file": str(file_path), "mode": index_status.get("mode"), "index_status": index_status}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return render_app()
@@ -792,13 +2076,161 @@ def list_users() -> List[Dict[str, Any]]:
     return service.users()
 
 
+@app.get("/api/users/{user_id}/detail")
+def user_detail(user_id: int) -> Dict[str, Any]:
+    return service.user_detail(user_id)
+
+
+@app.post("/api/users", status_code=201)
+def create_user(payload: UserIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_admin(current_user_id)
+    return service.create_user(payload)
+
+
+@app.put("/api/users/{user_id}")
+def update_user(user_id: int, payload: UserUpdate, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_admin(current_user_id)
+    return service.update_user(user_id, payload)
+
+
+@app.delete("/api/users/{user_id}", status_code=204)
+def delete_user(user_id: int, current_user_id: Optional[str] = None) -> None:
+    require_admin(current_user_id)
+    service.delete_user(user_id)
+
+
 @app.get("/api/clans")
 def list_clans() -> List[Dict[str, Any]]:
     return service.clans()
 
 
+@app.post("/api/clans", status_code=201)
+def create_clan(payload: GenealogyIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    payload.creator_user_id = actor
+    return service.create_clan(payload)
+
+
+@app.put("/api/clans/{clan_id}")
+def update_clan(clan_id: int, payload: GenealogyUpdate, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_clan_owner(clan_id, current_user_id)
+    return service.update_clan(clan_id, payload)
+
+
+@app.delete("/api/clans/{clan_id}", status_code=204)
+def delete_clan(clan_id: int, current_user_id: Optional[str] = None) -> None:
+    require_clan_owner(clan_id, current_user_id)
+    service.delete_clan(clan_id)
+
+
+@app.get("/api/clans/{clan_id}/collaborators")
+def list_collaborators(clan_id: int) -> List[Dict[str, Any]]:
+    return service.collaborators(clan_id)
+
+
+@app.get("/api/clans/{clan_id}/permission")
+def clan_permission(clan_id: int, current_user_id: str = Query(..., min_length=1)) -> Dict[str, bool]:
+    return service.clan_permission(clan_id, current_user_id)
+
+
+@app.post("/api/import/clan-csv")
+async def import_clan_from_csv(
+    csv_file: UploadFile = File(...),
+    title: str = Form(...),
+    surname: str = Form(""),
+    current_user_id: str = Form(...),
+) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    if not csv_file.filename or not csv_file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="请上传 CSV 文件")
+    imports_dir = ensure_output_dir("import")
+    saved_path = imports_dir / ("import_{}_{}".format(int(time.time()), Path(csv_file.filename).name))
+    with saved_path.open("wb") as handle:
+        while True:
+            chunk = await csv_file.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+    try:
+        result = import_tools().import_clan_csv(saved_path, title, surname, actor)
+        await csv_file.close()
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/import/generated")
+def import_generated(current_user_id: Optional[str] = None, total: Optional[int] = None) -> Dict[str, Any]:
+    require_admin(current_user_id)
+    try:
+        result = import_tools().import_generated_data(total=total, reset=True, creator_user_id="admin")
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/export/database")
+def export_database(current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_admin(current_user_id)
+    try:
+        return export_tools().export_database()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/export/clans")
+def export_clans(payload: ExportClansRequest, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    if not payload.clan_ids:
+        raise HTTPException(status_code=400, detail="请选择至少一个族谱")
+    if actor != "admin":
+        for clan_id in payload.clan_ids:
+            if not service.clan_permission(clan_id, actor)["can_edit"]:
+                raise HTTPException(status_code=403, detail="当前用户不能导出族谱 {}".format(clan_id))
+    try:
+        return export_tools().export_clans(payload.clan_ids)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/export/members/{member_id}")
+def export_member(member_id: int, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    if actor != "admin" and not service.clan_permission(member_clan_id(member_id), actor)["can_edit"]:
+        raise HTTPException(status_code=403, detail="当前用户不能导出该对象")
+    try:
+        return export_tools().export_member(member_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/performance/explain")
+def performance_explain(payload: PerformanceExplainRequest, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_actor(current_user_id)
+    try:
+        return write_search_explain(payload.q, payload.clan_id, payload.performance_mode)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/collaborations", status_code=201)
+def grant_collaboration(payload: CollaborationIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_clan_owner(payload.clan_id, current_user_id)
+    return service.grant_collaboration(payload)
+
+
+@app.delete("/api/collaborations")
+def revoke_collaboration(payload: CollaborationIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_clan_owner(payload.clan_id, current_user_id)
+    return service.revoke_collaboration(payload)
+
+
 @app.get("/api/dashboard")
-def dashboard(clan_id: int = 1) -> Dict[str, Any]:
+def dashboard(clan_id: Optional[int] = None) -> Dict[str, Any]:
+    if clan_id == 0:
+        clan_id = None
     return service.dashboard(clan_id)
 
 
@@ -807,41 +2239,97 @@ def list_members(clan_id: int = 1, q: str = "") -> List[Dict[str, Any]]:
     return service.members(clan_id, q)
 
 
+@app.get("/api/members/search-performance")
+def search_members_with_metrics(
+    clan_id: int = Query(0, ge=0),
+    q: str = "",
+    performance_mode: bool = False,
+) -> Dict[str, Any]:
+    return measured_member_search(clan_id, q, performance_mode)
+
+
+@app.get("/api/members/{member_id}/detail")
+def member_detail(member_id: int) -> Dict[str, Any]:
+    return service.member_detail(member_id)
+
+
 @app.post("/api/members", status_code=201)
-def create_member(payload: MemberIn) -> Dict[str, Any]:
+def create_member(payload: MemberIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_clan_edit(payload.clan_id, current_user_id)
     return service.create_member(payload)
 
 
 @app.put("/api/members/{member_id}")
-def update_member(member_id: int, payload: MemberUpdate) -> Dict[str, Any]:
+def update_member(member_id: int, payload: MemberUpdate, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_clan_edit(member_clan_id(member_id), current_user_id)
     return service.update_member(member_id, payload)
 
 
 @app.post("/api/members/{member_id}/photo")
-async def upload_member_photo(member_id: int, photo: UploadFile = File(...)) -> Dict[str, Any]:
+async def upload_member_photo(member_id: int, photo: UploadFile = File(...), current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_clan_edit(member_clan_id(member_id), current_user_id)
     if photo.content_type and not photo.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="只能上传图片文件")
 
     digest = hashlib.sha256()
     total_size = 0
+    chunks: List[bytes] = []
     while True:
         chunk = await photo.read(1024 * 1024)
         if not chunk:
             break
         total_size += len(chunk)
+        chunks.append(chunk)
         digest.update(chunk)
 
     if total_size == 0:
         raise HTTPException(status_code=400, detail="上传图片不能为空")
 
     photo_hash = digest.hexdigest()
-    member = service.update_member_photo_hash(member_id, photo_hash)
+    member = service.update_member_photo_hash(member_id, photo_hash, b"".join(chunks), photo.content_type or "image/jpeg")
     return {"ok": True, "member": member, "photo_sha256": photo_hash}
 
 
+@app.get("/api/members/{member_id}/photo")
+def get_member_photo(member_id: int) -> Response:
+    photo_data = service.member_photo(member_id)
+    if photo_data:
+        content, content_type = photo_data
+        return Response(content=content, media_type=content_type)
+    default_path = APP_DIR / "resources" / "defaultpic.jpg"
+    if not default_path.exists():
+        raise HTTPException(status_code=404, detail="默认图片不存在")
+    return Response(content=default_path.read_bytes(), media_type="image/jpeg")
+
+
 @app.delete("/api/members/{member_id}", status_code=204)
-def delete_member(member_id: int) -> None:
+def delete_member(member_id: int, current_user_id: Optional[str] = None) -> None:
+    require_clan_edit(member_clan_id(member_id), current_user_id)
     service.delete_member(member_id)
+
+
+@app.get("/api/members/{member_id}/marriages")
+def list_member_marriages(member_id: int, current_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    require_actor(current_user_id)
+    return service.member_marriages(member_id)
+
+
+@app.post("/api/marriages", status_code=201)
+def create_marriage(payload: MarriageIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_clan_edit(member_clan_id(payload.member_id), current_user_id)
+    return service.create_marriage(payload)
+
+
+@app.put("/api/marriages/{marriage_id}/divorce")
+def set_marriage_divorce(marriage_id: int, payload: MarriageDivorceIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_clan_edit(marriage_clan_id(marriage_id), current_user_id)
+    return service.set_divorce(marriage_id, payload)
+
+
+@app.delete("/api/marriages/{marriage_id}", status_code=204)
+def delete_marriage(marriage_id: int, current_user_id: Optional[str] = None) -> None:
+    require_clan_edit(marriage_clan_id(marriage_id), current_user_id)
+    service.delete_marriage(marriage_id)
 
 
 @app.get("/api/tree")
@@ -859,7 +2347,121 @@ def relationship(member_id: int, target_id: int = Query(..., gt=0)) -> Dict[str,
     return {"path": service.relationship_path(member_id, target_id)}
 
 
+@app.get("/api/query/spouse_children")
+def query_spouse_children(member_id: Optional[int] = None, name: Optional[str] = None) -> Dict[str, Any]:
+    if member_id is None:
+        if not name:
+            raise HTTPException(status_code=400, detail="需要 member_id 或 name")
+        matches = member_rows_by_name(name)
+        if not matches:
+            raise HTTPException(status_code=404, detail="未找到成员")
+        member_id = int(matches[0]["member_id"])
+    detail = service.member_detail(member_id)
+    return {"member": detail["member"], "spouses": detail["spouses"], "children": detail["children"]}
+
+
+@app.get("/api/query/longevity")
+def query_longevity(clan_id: int = Query(..., gt=0)) -> List[Dict[str, Any]]:
+    groups: Dict[int, List[int]] = {}
+    for row in all_member_rows(clan_id):
+        generation = optional_row_int(row, "generation_num")
+        age = row_age(row)
+        if generation is not None and age is not None:
+            groups.setdefault(generation, []).append(age)
+    result = []
+    for generation, ages in groups.items():
+        result.append({
+            "generation_num": generation,
+            "avg_lifespan": round(sum(ages) / len(ages), 2),
+            "member_count": len(ages),
+        })
+    return sorted(result, key=lambda item: item["avg_lifespan"], reverse=True)
+
+
+@app.get("/api/query/singles")
+def query_singles(clan_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    if clan_id == 0:
+        clan_id = None
+    rows = all_member_rows(clan_id)
+    result = []
+    for row in rows:
+        if row.get("gender") != "M":
+            continue
+        birth_year = optional_row_int(row, "birth_year")
+        if not birth_year or optional_row_int(row, "death_year"):
+            continue
+        age = datetime.now().year - birth_year
+        if age <= 50:
+            continue
+        member_id = int(row["member_id"])
+        has_spouse = any(
+            (optional_row_int(child, "father_id") == member_id and optional_row_int(child, "mother_id") is not None)
+            or (optional_row_int(child, "mother_id") == member_id and optional_row_int(child, "father_id") is not None)
+            for child in rows
+        )
+        if not has_spouse:
+            result.append(merge_dict(row, {"age": age}))
+    return sorted(result, key=lambda item: (int(item["clan_id"]), int(item["birth_year"])))[:200]
+
+
+@app.get("/api/query/early_birth")
+def query_early_birth(clan_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    if clan_id == 0:
+        clan_id = None
+    rows = all_member_rows(clan_id)
+    groups: Dict[Tuple[int, int], List[int]] = {}
+    for row in rows:
+        current_clan = optional_row_int(row, "clan_id")
+        generation = optional_row_int(row, "generation_num")
+        birth_year = optional_row_int(row, "birth_year")
+        if current_clan is not None and generation is not None and birth_year is not None:
+            groups.setdefault((current_clan, generation), []).append(birth_year)
+    averages = {key: sum(values) / len(values) for key, values in groups.items()}
+    result = []
+    for row in rows:
+        current_clan = optional_row_int(row, "clan_id")
+        generation = optional_row_int(row, "generation_num")
+        birth_year = optional_row_int(row, "birth_year")
+        key = (current_clan, generation)
+        if current_clan is None or generation is None or birth_year is None or key not in averages:
+            continue
+        avg_birth = averages[key]
+        if birth_year < avg_birth:
+            result.append(merge_dict(row, {
+                "avg_birth_year": round(avg_birth, 2),
+                "years_before_avg": round(avg_birth - birth_year, 2),
+            }))
+    return sorted(result, key=lambda item: (int(item["clan_id"]), int(item.get("generation_num") or 0), int(item["birth_year"])))[:300]
+
+
+@app.get("/api/query/great_grandchildren")
+def query_great_grandchildren(member_id: Optional[int] = None, name: Optional[str] = None) -> List[Dict[str, Any]]:
+    if member_id is None:
+        if not name:
+            raise HTTPException(status_code=400, detail="需要 member_id 或 name")
+        matches = member_rows_by_name(name)
+        if not matches:
+            raise HTTPException(status_code=404, detail="未找到成员")
+        member_id = int(matches[0]["member_id"])
+    rows = all_member_rows()
+    by_parent: Dict[int, List[Dict[str, Any]]] = {}
+    for row in rows:
+        for parent_key in ("father_id", "mother_id"):
+            parent_id = optional_row_int(row, parent_key)
+            if parent_id:
+                by_parent.setdefault(parent_id, []).append(row)
+    generation = [row for row in by_parent.get(member_id, [])]
+    for _ in range(2):
+        next_generation = []
+        for row in generation:
+            next_generation.extend(by_parent.get(int(row["member_id"]), []))
+        generation = next_generation
+    unique = {int(row["member_id"]): row for row in generation}
+    return sorted(unique.values(), key=lambda item: int(item["member_id"]))[:300]
+
+
 @app.post("/api/invitations", status_code=201)
-def invite(payload: InvitationIn) -> Dict[str, Any]:
-    return service.invite(payload)
+def invite(payload: InvitationIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_clan_owner(payload.clan_id, current_user_id)
+    return service.grant_collaboration(CollaborationIn(clan_id=payload.clan_id, user_id=payload.user_id))
 

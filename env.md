@@ -325,3 +325,40 @@ export TOTEM_PORT=55432
 ```
 
 不要在该 `\COPY` 元命令末尾添加分号。
+
+---
+
+## 10. 一键启动快捷方式
+
+项目根目录新增了 `start-genealogy.bat`，在 Windows 中双击即可按配置启动：
+
+1. 进入配置指定的 WSL 发行版。
+2. 使用 `totem` 用户启动 Totem 数据库。
+3. 使用配置中的端口和数据库名检查 `SELECT 1;`。
+4. 进入项目目录并启动 `uvicorn main:app`。
+
+启动参数集中存放在：
+
+```text
+config/startup/startup.json
+```
+
+如果本机路径、WSL 用户、数据库端口或数据库名不同，不建议直接改默认配置；可以复制一份：
+
+```text
+config/startup/startup.local.json
+```
+
+脚本会优先读取 `startup.local.json`，该文件已加入 `.gitignore`，适合保存个人机器配置。
+
+默认启动后访问：
+
+```text
+http://localhost:8000
+```
+
+也可以只检查数据库和配置，不启动 Web：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-genealogy.ps1 -CheckOnly
+```
