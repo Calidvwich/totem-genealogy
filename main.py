@@ -15,13 +15,15 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from interface import render_app
+from logsave import log_error, log_exception, log_user_action, start_user_log
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -538,7 +540,7 @@ class DemoGenealogyService(GenealogyService):
 
     def members(self, clan_id: int, q: str = "") -> List[Dict[str, Any]]:
         keyword = q.strip().lower()
-        rows = [m for m in self._members.values() if m.clan_id == clan_id]
+        rows = [m for m in self._members.values() if not clan_id or m.clan_id == clan_id]
         if keyword:
             rows = [m for m in rows if keyword in m.name.lower() or keyword in str(m.member_id)]
         return [public_member(m) for m in sorted(rows, key=lambda item: (item.generation_num or 999, item.member_id))]
@@ -1153,12 +1155,15 @@ class TotemGenealogyService(DemoGenealogyService):
 
     def members(self, clan_id: int, q: str = "") -> List[Dict[str, Any]]:
         try:
-            where = [f"clan_id = {sql_literal(clan_id)}"]
+            where = []
+            if clan_id:
+                where.append(f"clan_id = {sql_literal(clan_id)}")
             if q.strip():
                 where.append(f"name LIKE {sql_literal('%' + q.strip() + '%')}")
+            where_sql = "WHERE " + " AND ".join(where) if where else ""
             sql = (
                 "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
-                f"FROM members WHERE {' AND '.join(where)} ORDER BY generation_num, member_id LIMIT 200;"
+                f"FROM members {where_sql} ORDER BY clan_id, generation_num, member_id LIMIT 200;"
             )
             return self.client.query(sql)
         except Exception:
@@ -1789,6 +1794,35 @@ app.add_middleware(
 app.mount("/resources", StaticFiles(directory=APP_DIR / "resources"), name="resources")
 
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    log_error(
+        "error",
+        "{} {} status={} detail={}".format(
+            request.method,
+            request.url.path,
+            exc.status_code,
+            exc.detail,
+        ),
+    )
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    log_error(
+        "error",
+        "{} {} validation={}".format(request.method, request.url.path, exc.errors()),
+    )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    log_exception("crash", exc, "{} {}".format(request.method, request.url.path))
+    return JSONResponse(status_code=500, content={"detail": "服务器内部错误"})
+
+
 def load_script_module(filename: str, module_name: str):
     spec = importlib.util.spec_from_file_location(module_name, APP_DIR / filename)
     if spec is None or spec.loader is None:
@@ -1829,6 +1863,11 @@ def require_admin(current_user_id: Optional[str]) -> str:
     if actor != "admin":
         raise HTTPException(status_code=403, detail="只有 admin 可以管理用户")
     return actor
+
+
+def record_action(current_user_id: Optional[str], log_session: Optional[str], action_type: str, target: Any) -> None:
+    if current_user_id:
+        log_user_action(current_user_id, log_session or "", action_type, target)
 
 
 def require_clan_edit(clan_id: int, current_user_id: Optional[str]) -> None:
@@ -1893,6 +1932,32 @@ def all_member_rows(clan_id: Optional[int] = None) -> List[Dict[str, Any]]:
 
 def member_rows_by_name(name: str) -> List[Dict[str, Any]]:
     return [row for row in all_member_rows() if row.get("name") == name]
+
+
+def resolve_query_member_id(member_id: Optional[int], name: Optional[str]) -> int:
+    if member_id is not None:
+        detail = service.member_detail(member_id)
+        if name and (detail.get("member") or {}).get("name") != name.strip():
+            actual_name = (detail.get("member") or {}).get("name") or "-"
+            raise HTTPException(status_code=400, detail=f"确认 ID 对应姓名为 {actual_name}，不是 {name}")
+        return int(member_id)
+    if not name:
+        raise HTTPException(status_code=400, detail="需要 member_id 或 name")
+    matches = member_rows_by_name(name.strip())
+    if not matches:
+        raise HTTPException(status_code=404, detail=f"未找到成员：{name}")
+    if len(matches) > 1:
+        choices = "；".join(
+            "{} #{}（族谱 {}，第{}代）".format(
+                row.get("name"),
+                row.get("member_id"),
+                row.get("clan_id"),
+                row.get("generation_num") or "-",
+            )
+            for row in matches[:10]
+        )
+        raise HTTPException(status_code=409, detail=f"成员存在重名，请填写具体 ID：{choices}")
+    return int(matches[0]["member_id"])
 
 
 def optional_row_int(row: Dict[str, Any], key: str) -> Optional[int]:
@@ -2062,13 +2127,28 @@ def write_search_explain(q: str, clan_id: int = 0, performance_mode: bool = Fals
 
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return render_app()
+def index() -> HTMLResponse:
+    return HTMLResponse(
+        render_app(),
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @app.post("/api/login")
 def login(payload: LoginRequest) -> Dict[str, Any]:
-    return service.authenticate(payload.user_id, payload.password)
+    result = service.authenticate(payload.user_id, payload.password)
+    result["log_session"] = start_user_log(payload.user_id)
+    return result
+
+
+@app.post("/api/logout")
+def logout(current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    record_action(actor, log_session, "log-out", actor)
+    return {"ok": True}
 
 
 @app.post("/api/register", status_code=201)
@@ -2080,21 +2160,25 @@ def register(payload: UserIn) -> Dict[str, Any]:
 
 
 @app.get("/api/users")
-def list_users(current_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    require_admin(current_user_id)
+def list_users(current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> List[Dict[str, Any]]:
+    actor = require_admin(current_user_id)
+    record_action(actor, log_session, "search-user", "all")
     return service.users()
 
 
 @app.get("/api/users/{user_id}/detail")
-def user_detail(user_id: int, current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_admin(current_user_id)
+def user_detail(user_id: int, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_admin(current_user_id)
+    record_action(actor, log_session, "search-user", user_id)
     return service.user_detail(user_id)
 
 
 @app.post("/api/users", status_code=201)
-def create_user(payload: UserIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_admin(current_user_id)
-    return service.create_user(payload)
+def create_user(payload: UserIn, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_admin(current_user_id)
+    result = service.create_user(payload)
+    record_action(actor, log_session, "add-user", result.get("user_id", payload.user_id))
+    return result
 
 
 @app.put("/api/users/{user_id}")
@@ -2104,9 +2188,10 @@ def update_user(user_id: int, payload: UserUpdate, current_user_id: Optional[str
 
 
 @app.delete("/api/users/{user_id}", status_code=204)
-def delete_user(user_id: int, current_user_id: Optional[str] = None) -> None:
-    require_admin(current_user_id)
+def delete_user(user_id: int, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> None:
+    actor = require_admin(current_user_id)
     service.delete_user(user_id)
+    record_action(actor, log_session, "remove-user", user_id)
 
 
 @app.get("/api/clans")
@@ -2115,22 +2200,29 @@ def list_clans() -> List[Dict[str, Any]]:
 
 
 @app.post("/api/clans", status_code=201)
-def create_clan(payload: GenealogyIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+def create_clan(payload: GenealogyIn, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
     actor = require_actor(current_user_id)
     payload.creator_user_id = actor
-    return service.create_clan(payload)
+    result = service.create_clan(payload)
+    record_action(actor, log_session, "add-data", "clan:{}".format(result.get("clan_id", "")))
+    return result
 
 
 @app.put("/api/clans/{clan_id}")
-def update_clan(clan_id: int, payload: GenealogyUpdate, current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_clan_owner(clan_id, current_user_id)
-    return service.update_clan(clan_id, payload)
+def update_clan(clan_id: int, payload: GenealogyUpdate, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    require_clan_owner(clan_id, actor)
+    result = service.update_clan(clan_id, payload)
+    record_action(actor, log_session, "add-data", "clan:{}".format(clan_id))
+    return result
 
 
 @app.delete("/api/clans/{clan_id}", status_code=204)
-def delete_clan(clan_id: int, current_user_id: Optional[str] = None) -> None:
-    require_clan_owner(clan_id, current_user_id)
+def delete_clan(clan_id: int, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> None:
+    actor = require_actor(current_user_id)
+    require_clan_owner(clan_id, actor)
     service.delete_clan(clan_id)
+    record_action(actor, log_session, "remove-data", "clan:{}".format(clan_id))
 
 
 @app.get("/api/clans/{clan_id}/collaborators")
@@ -2149,6 +2241,7 @@ async def import_clan_from_csv(
     title: str = Form(...),
     surname: str = Form(""),
     current_user_id: str = Form(...),
+    log_session: str = Form(""),
 ) -> Dict[str, Any]:
     actor = require_actor(current_user_id)
     if not csv_file.filename or not csv_file.filename.lower().endswith(".csv"):
@@ -2164,16 +2257,44 @@ async def import_clan_from_csv(
     try:
         result = import_tools().import_clan_csv(saved_path, title, surname, actor)
         await csv_file.close()
+        record_action(actor, log_session, "add-data", "import-csv:{}".format(result.get("clan_id", title)))
         return result
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/import/generated")
-def import_generated(current_user_id: Optional[str] = None, total: Optional[int] = None) -> Dict[str, Any]:
-    require_admin(current_user_id)
+def import_generated(current_user_id: Optional[str] = None, total: Optional[int] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_admin(current_user_id)
     try:
         result = import_tools().import_generated_data(total=total, reset=True, creator_user_id="admin")
+        record_action(actor, log_session, "add-data", "import-generated")
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/import/bundle")
+async def import_bundle_file(
+    bundle_file: UploadFile = File(...),
+    current_user_id: str = Form(...),
+    log_session: str = Form(""),
+) -> Dict[str, Any]:
+    actor = require_admin(current_user_id)
+    if not bundle_file.filename or not bundle_file.filename.lower().endswith(".json"):
+        raise HTTPException(status_code=400, detail="请上传 export.py 生成的 import_bundle.json")
+    imports_dir = ensure_output_dir("import")
+    saved_path = imports_dir / ("bundle_{}_{}".format(int(time.time()), Path(bundle_file.filename).name))
+    with saved_path.open("wb") as handle:
+        while True:
+            chunk = await bundle_file.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+    try:
+        result = import_tools().import_bundle(saved_path)
+        await bundle_file.close()
+        record_action(actor, log_session, "add-data", "import-bundle:{}".format(Path(bundle_file.filename).name))
         return result
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -2226,15 +2347,21 @@ def performance_explain(payload: PerformanceExplainRequest, current_user_id: Opt
 
 
 @app.post("/api/collaborations", status_code=201)
-def grant_collaboration(payload: CollaborationIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_clan_owner(payload.clan_id, current_user_id)
-    return service.grant_collaboration(payload)
+def grant_collaboration(payload: CollaborationIn, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    require_clan_owner(payload.clan_id, actor)
+    result = service.grant_collaboration(payload)
+    record_action(actor, log_session, "grant-access", "{}:{}".format(payload.clan_id, payload.user_id))
+    return result
 
 
 @app.delete("/api/collaborations")
-def revoke_collaboration(payload: CollaborationIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_clan_owner(payload.clan_id, current_user_id)
-    return service.revoke_collaboration(payload)
+def revoke_collaboration(payload: CollaborationIn, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    require_clan_owner(payload.clan_id, actor)
+    result = service.revoke_collaboration(payload)
+    record_action(actor, log_session, "remove-access", "{}:{}".format(payload.clan_id, payload.user_id))
+    return result
 
 
 @app.get("/api/dashboard")
@@ -2254,8 +2381,12 @@ def search_members_with_metrics(
     clan_id: int = Query(0, ge=0),
     q: str = "",
     performance_mode: bool = False,
+    current_user_id: Optional[str] = None,
+    log_session: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return measured_member_search(clan_id, q, performance_mode)
+    result = measured_member_search(clan_id, q, performance_mode)
+    record_action(current_user_id, log_session, "search-data", q or "empty")
+    return result
 
 
 @app.get("/api/members/{member_id}/detail")
@@ -2264,20 +2395,27 @@ def member_detail(member_id: int) -> Dict[str, Any]:
 
 
 @app.post("/api/members", status_code=201)
-def create_member(payload: MemberIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_clan_edit(payload.clan_id, current_user_id)
-    return service.create_member(payload)
+def create_member(payload: MemberIn, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    require_clan_edit(payload.clan_id, actor)
+    result = service.create_member(payload)
+    record_action(actor, log_session, "add-data", result.get("member_id", payload.name))
+    return result
 
 
 @app.put("/api/members/{member_id}")
-def update_member(member_id: int, payload: MemberUpdate, current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_clan_edit(member_clan_id(member_id), current_user_id)
-    return service.update_member(member_id, payload)
+def update_member(member_id: int, payload: MemberUpdate, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    require_clan_edit(member_clan_id(member_id), actor)
+    result = service.update_member(member_id, payload)
+    record_action(actor, log_session, "add-data", member_id)
+    return result
 
 
 @app.post("/api/members/{member_id}/photo")
-async def upload_member_photo(member_id: int, photo: UploadFile = File(...), current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_clan_edit(member_clan_id(member_id), current_user_id)
+async def upload_member_photo(member_id: int, photo: UploadFile = File(...), current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    require_clan_edit(member_clan_id(member_id), actor)
     if photo.content_type and not photo.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="只能上传图片文件")
 
@@ -2297,6 +2435,7 @@ async def upload_member_photo(member_id: int, photo: UploadFile = File(...), cur
 
     photo_hash = digest.hexdigest()
     member = service.update_member_photo_hash(member_id, photo_hash, b"".join(chunks), photo.content_type or "image/jpeg")
+    record_action(actor, log_session, "add-data", "photo:{}".format(member_id))
     return {"ok": True, "member": member, "photo_sha256": photo_hash}
 
 
@@ -2313,9 +2452,11 @@ def get_member_photo(member_id: int) -> Response:
 
 
 @app.delete("/api/members/{member_id}", status_code=204)
-def delete_member(member_id: int, current_user_id: Optional[str] = None) -> None:
-    require_clan_edit(member_clan_id(member_id), current_user_id)
+def delete_member(member_id: int, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> None:
+    actor = require_actor(current_user_id)
+    require_clan_edit(member_clan_id(member_id), actor)
     service.delete_member(member_id)
+    record_action(actor, log_session, "remove-data", member_id)
 
 
 @app.get("/api/members/{member_id}/marriages")
@@ -2325,21 +2466,29 @@ def list_member_marriages(member_id: int, current_user_id: Optional[str] = None)
 
 
 @app.post("/api/marriages", status_code=201)
-def create_marriage(payload: MarriageIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_clan_edit(member_clan_id(payload.member_id), current_user_id)
-    return service.create_marriage(payload)
+def create_marriage(payload: MarriageIn, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    require_clan_edit(member_clan_id(payload.member_id), actor)
+    result = service.create_marriage(payload)
+    record_action(actor, log_session, "add-data", "marriage:{}".format(result.get("marriage_id", "")))
+    return result
 
 
 @app.put("/api/marriages/{marriage_id}/divorce")
-def set_marriage_divorce(marriage_id: int, payload: MarriageDivorceIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
-    require_clan_edit(marriage_clan_id(marriage_id), current_user_id)
-    return service.set_divorce(marriage_id, payload)
+def set_marriage_divorce(marriage_id: int, payload: MarriageDivorceIn, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    actor = require_actor(current_user_id)
+    require_clan_edit(marriage_clan_id(marriage_id), actor)
+    result = service.set_divorce(marriage_id, payload)
+    record_action(actor, log_session, "add-data", "marriage-divorce:{}".format(marriage_id))
+    return result
 
 
 @app.delete("/api/marriages/{marriage_id}", status_code=204)
-def delete_marriage(marriage_id: int, current_user_id: Optional[str] = None) -> None:
-    require_clan_edit(marriage_clan_id(marriage_id), current_user_id)
+def delete_marriage(marriage_id: int, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> None:
+    actor = require_actor(current_user_id)
+    require_clan_edit(marriage_clan_id(marriage_id), actor)
     service.delete_marriage(marriage_id)
+    record_action(actor, log_session, "remove-data", "marriage:{}".format(marriage_id))
 
 
 @app.get("/api/tree")
@@ -2359,15 +2508,15 @@ def relationship(member_id: int, target_id: int = Query(..., gt=0)) -> Dict[str,
 
 @app.get("/api/query/spouse_children")
 def query_spouse_children(member_id: Optional[int] = None, name: Optional[str] = None) -> Dict[str, Any]:
-    if member_id is None:
-        if not name:
-            raise HTTPException(status_code=400, detail="需要 member_id 或 name")
-        matches = member_rows_by_name(name)
-        if not matches:
-            raise HTTPException(status_code=404, detail="未找到成员")
-        member_id = int(matches[0]["member_id"])
+    member_id = resolve_query_member_id(member_id, name)
     detail = service.member_detail(member_id)
     return {"member": detail["member"], "spouses": detail["spouses"], "children": detail["children"]}
+
+
+@app.get("/api/query/ancestors")
+def query_ancestors(member_id: Optional[int] = None, name: Optional[str] = None) -> List[Dict[str, Any]]:
+    member_id = resolve_query_member_id(member_id, name)
+    return service.ancestors(member_id)
 
 
 @app.get("/api/query/longevity")
@@ -2446,13 +2595,7 @@ def query_early_birth(clan_id: Optional[int] = None) -> List[Dict[str, Any]]:
 
 @app.get("/api/query/great_grandchildren")
 def query_great_grandchildren(member_id: Optional[int] = None, name: Optional[str] = None) -> List[Dict[str, Any]]:
-    if member_id is None:
-        if not name:
-            raise HTTPException(status_code=400, detail="需要 member_id 或 name")
-        matches = member_rows_by_name(name)
-        if not matches:
-            raise HTTPException(status_code=404, detail="未找到成员")
-        member_id = int(matches[0]["member_id"])
+    member_id = resolve_query_member_id(member_id, name)
     rows = all_member_rows()
     by_parent: Dict[int, List[Dict[str, Any]]] = {}
     for row in rows:
@@ -2474,4 +2617,3 @@ def query_great_grandchildren(member_id: Optional[int] = None, name: Optional[st
 def invite(payload: InvitationIn, current_user_id: Optional[str] = None) -> Dict[str, Any]:
     require_clan_owner(payload.clan_id, current_user_id)
     return service.grant_collaboration(CollaborationIn(clan_id=payload.clan_id, user_id=payload.user_id))
-

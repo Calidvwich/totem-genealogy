@@ -22,7 +22,15 @@ $Config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
 function Quote-Bash {
     param([string]$Value)
-    return "'" + ($Value -replace "'", "'`"`"`'") + "'"
+    return "'" + ($Value -replace "'", "'\''") + "'"
+}
+
+function Bash-Env {
+    param(
+        [string]$Name,
+        [string]$Value
+    )
+    return "export $Name=$((Quote-Bash $Value))"
 }
 
 function Join-WslPath {
@@ -110,13 +118,13 @@ $AppEnv = @(
     "cd",
     (Quote-Bash $Config.app.project_dir),
     "&&",
-    "export TOTEM_USE_DEMO=" + (Quote-Bash $Config.app.use_demo),
+    (Bash-Env "TOTEM_USE_DEMO" $Config.app.use_demo),
     "&&",
-    "export TOTEM_DATABASE=" + (Quote-Bash $Config.totem.database),
+    (Bash-Env "TOTEM_DATABASE" $Config.totem.database),
     "&&",
-    "export TOTEM_USER=" + (Quote-Bash $Config.totem.user),
+    (Bash-Env "TOTEM_USER" $Config.totem.user),
     "&&",
-    "export TOTEM_PORT=" + (Quote-Bash $Config.totem.port)
+    (Bash-Env "TOTEM_PORT" $Config.totem.port)
 )
 
 $UvicornCommand = @(
@@ -135,6 +143,9 @@ if ($Config.app.background -eq $true) {
     $LogFile = Quote-Bash $Config.app.log_file
     $HealthCheck = (Quote-Bash $Config.app.python) + " -c " + (Quote-Bash ("import urllib.request; urllib.request.urlopen('http://127.0.0.1:" + $Config.app.port + "', timeout=5).read(1)"))
     $StartWeb = @(
+        "if [ -f $PidFile ] && ! kill -0 `$(cat $PidFile) 2>/dev/null; then",
+        "rm -f $PidFile;",
+        "fi;",
         "if [ -f $PidFile ] && kill -0 `$(cat $PidFile) 2>/dev/null; then",
         "echo 'FastAPI already running with PID' `$(cat $PidFile);",
         "else",
@@ -147,8 +158,12 @@ if ($Config.app.background -eq $true) {
         "echo `$! > $PidFile;",
         "echo 'FastAPI started with PID' `$(cat $PidFile);",
         "fi;",
-        "sleep 2;",
-        "if $HealthCheck; then",
+        "ready=0;",
+        "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do",
+        "if $HealthCheck >/dev/null 2>&1; then ready=1; break; fi;",
+        "sleep 1;",
+        "done;",
+        "if [ `$ready -eq 1 ]; then",
         "echo 'FastAPI is listening on port $($Config.app.port).';",
         "else",
         "echo 'FastAPI did not start. Recent log:';",

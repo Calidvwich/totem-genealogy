@@ -1,0 +1,14 @@
+{
+  "type": "database",
+  "database": "genealogy",
+  "exported_at": "2026-06-15T17:15:09",
+  "files": [
+    "users.csv",
+    "genealogies.csv",
+    "collaborations.csv",
+    "members.csv",
+    "marriages.csv",
+    "member_photos.csv"
+  ],
+  "import_file": "import_bundle.json"
+}

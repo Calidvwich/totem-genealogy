@@ -13,6 +13,7 @@ env/
 # FastAPI / local server artifacts
 *.log
 logfile
+log/
 *.pid
 uvicorn.pid
 config/startup/startup.local.json

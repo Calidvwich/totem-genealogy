@@ -275,10 +275,13 @@ def render_app() -> str:
       <label>姓氏</label><input id="import_surname" placeholder="例如：张">
       <label>成员 CSV</label><input type="file" id="import_csv" accept=".csv,text/csv">
       <div class="notice">CSV 至少需要 name/姓名 字段，可选 gender、birth_year、death_year、father_id、mother_id、generation_num、bio。</div>
+      <label>导入导出包</label><input type="file" id="import_bundle" accept=".json,application/json">
+      <div class="notice">选择导出目录中的 import_bundle.json 可恢复数据库或部分族谱。若存在重复 ID 或账号，导入会停止并提示原因。</div>
       <div id="importMsg" class="notice"></div>
       <div class="modal-footer">
         <button class="btn-cancel" onclick="closeModal('importModal')">取消</button>
         <button class="btn-primary" onclick="submitClanImport()">导入 CSV 新建族谱</button>
+        <button class="btn-violet" onclick="submitBundleImport()">导入导出包</button>
         <button class="btn-danger" onclick="submitGeneratedImport()" title="清空现有族谱、成员、婚姻和协作关系后导入生成脚本数据">导入生成数据</button>
       </div>
     </div>
@@ -320,13 +323,17 @@ def render_app() -> str:
 
   <script>
     let myChart = null, pieChart = null;
-    const state = { user:null, clans:[], users:[], currentClanId:0, currentPerm:{can_edit:false,is_owner:false}, currentTreeMemberId:null, currentDetailMemberId:null, treeZoom:1, treeRoots:[] };
+    const state = { user:null, logSession:null, clans:[], users:[], currentClanId:0, currentPerm:{can_edit:false,is_owner:false}, currentTreeMemberId:null, currentDetailMemberId:null, treeZoom:1, treeRoots:[] };
     const $ = (id) => document.getElementById(id);
     const esc = (v) => (v == null ? "" : String(v)).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
     const num = (v) => v === "" || v == null ? null : Number(v);
     const formatDate = (v) => v ? String(v).replace("T", " ").slice(0, 19) : "-";
     const actorId = () => state.user ? state.user.user_id : "";
-    const actorParam = () => `current_user_id=${encodeURIComponent(actorId())}`;
+    const actorParam = () => {
+      const parts = [`current_user_id=${encodeURIComponent(actorId())}`];
+      if (state.logSession) parts.push(`log_session=${encodeURIComponent(state.logSession)}`);
+      return parts.join("&");
+    };
     function fieldName(name) {
       const map = {user_id:"账号", password:"密码", username:"用户名", title:"标题", name:"姓名"};
       return map[name] || name;
@@ -369,6 +376,7 @@ def render_app() -> str:
         msg.textContent = "验证中...";
         const data = await api("/api/login", {method:"POST", body:JSON.stringify({user_id:userId, password:password})});
         state.user = data.user;
+        state.logSession = data.log_session || "";
         $("currentUserLabel").textContent = `${data.user.username || data.user.user_id} | 已登录`;
         $("userManageBtn").style.display = actorId() === "admin" ? "" : "none";
         $("loginOverlay").style.display = "none";
@@ -416,7 +424,11 @@ def render_app() -> str:
       }
     }
     async function logout() {
+      try {
+        if (state.user) await api(`/api/logout?${actorParam()}`, {method:"POST"});
+      } catch(e) {}
       state.user = null;
+      state.logSession = null;
       state.currentClanId = 0;
       if (myChart) myChart.clear();
       if (pieChart) pieChart.clear();
@@ -501,7 +513,7 @@ def render_app() -> str:
       msg.textContent = "查询中...";
       try {
         const perf = $("perfModeToggle").checked;
-        const data = await api(`/api/members/search-performance?clan_id=0&q=${encodeURIComponent(q)}&performance_mode=${perf}`);
+        const data = await api(`/api/members/search-performance?clan_id=0&q=${encodeURIComponent(q)}&performance_mode=${perf}&${actorParam()}`);
         const found = data.ok && Number(data.count || 0) > 0;
         msg.style.color = found ? "var(--success)" : "var(--danger)";
         msg.textContent = `${found ? "搜索成功" : "搜索失败，未检索到对象"} | ${data.mode === "performance" ? "性能模式/索引启用" : "普通模式/索引关闭"} | 用时 ${data.elapsed_ms} ms | 内存 ${data.memory_kb} KB | 结果 ${data.count} 条${data.error ? " | " + data.error : ""}`;
@@ -1108,6 +1120,7 @@ def render_app() -> str:
       form.append("title", $("import_title").value.trim());
       form.append("surname", $("import_surname").value.trim());
       form.append("current_user_id", actorId());
+      if (state.logSession) form.append("log_session", state.logSession);
       try {
         msg.style.color = "#64748b";
         msg.textContent = "正在导入...";
@@ -1141,6 +1154,39 @@ def render_app() -> str:
       } catch(e) {
         $("importMsg").style.color = "var(--danger)";
         $("importMsg").textContent = e.message;
+      }
+    }
+    async function submitBundleImport() {
+      const file = $("import_bundle").files[0];
+      const msg = $("importMsg");
+      if (actorId() !== "admin") {
+        msg.style.color = "var(--danger)";
+        msg.textContent = "只有 admin 可以导入导出包";
+        return;
+      }
+      if (!file) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = "请选择导出目录中的 import_bundle.json";
+        return;
+      }
+      if (!confirm("导入会在发现任何重复 ID、账号或协作关系时停止。确认继续？")) return;
+      const form = new FormData();
+      form.append("bundle_file", file);
+      form.append("current_user_id", actorId());
+      if (state.logSession) form.append("log_session", state.logSession);
+      try {
+        msg.style.color = "#64748b";
+        msg.textContent = "正在导入导出包...";
+        const result = await api("/api/import/bundle", {method:"POST", body:form});
+        msg.style.color = "var(--success)";
+        msg.textContent = `导入完成：users ${result.inserted.users || 0}，族谱 ${result.inserted.genealogies || 0}，成员 ${result.inserted.members || 0}`;
+        await loadClans();
+        await updateDashboard();
+        resetSearchPanel();
+        renderEmptyTree();
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
       }
     }
     async function openExportModal() {
@@ -1204,27 +1250,18 @@ def render_app() -> str:
       if (!rows.length) return `<p class="notice">${empty}</p>`;
       return `<table class="query-result-table"><thead><tr>${headers.map(h=>`<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${esc(c == null || c === "" ? "—" : c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
     }
-    async function resolveQueryMember(type, label) {
+    function queryMemberParams(type, label) {
       const nameEl = $(`q-${type}-name`);
       const idEl = $(`q-${type}-id`);
       const name = nameEl ? nameEl.value.trim() : "";
       const explicitId = idEl ? num(idEl.value) : null;
       if (explicitId) {
-        if (name) {
-          const detail = await api(`/api/members/${explicitId}/detail`);
-          const m = detail.member || {};
-          if (m.name !== name) throw new Error(`${label}确认 ID 对应姓名为 ${m.name}，不是 ${name}`);
-        }
-        return explicitId;
+        const parts = [`member_id=${encodeURIComponent(explicitId)}`];
+        if (name) parts.push(`name=${encodeURIComponent(name)}`);
+        return parts.join("&");
       }
       if (!name) throw new Error(`请输入${label}姓名`);
-      const matches = (await api(`/api/members?clan_id=0&q=${encodeURIComponent(name)}`)).filter(m => m.name === name);
-      if (!matches.length) throw new Error(`未找到${label}：${name}`);
-      if (matches.length > 1) {
-        const choices = matches.slice(0, 10).map(m => `${m.name} #${m.member_id}（族谱 ${m.clan_id}，${genderLabel(m.gender)}，第${m.generation_num || "-"}代）`).join("；");
-        throw new Error(`${label}存在重名，请填写具体 ID：${choices}`);
-      }
-      return Number(matches[0].member_id);
+      return `name=${encodeURIComponent(name)}`;
     }
     async function runQuery(type) {
       const out = $("qr-" + type);
@@ -1232,12 +1269,10 @@ def render_app() -> str:
       try {
         let data;
         if (type === "spouse") {
-          const memberId = await resolveQueryMember("spouse", "成员");
-          data = await api(`/api/query/spouse_children?member_id=${memberId}`);
+          data = await api(`/api/query/spouse_children?${queryMemberParams("spouse", "成员")}`);
           out.innerHTML = "<h4>配偶</h4>" + table(["姓名","性别","出生年"], data.spouses.map(s=>[s.name, genderLabel(s.gender), s.birth_year]), "暂无配偶") + "<h4>子女</h4>" + table(["姓名","性别","出生年","世代"], data.children.map(c=>[c.name, genderLabel(c.gender), c.birth_year, c.generation_num]), "暂无子女");
         } else if (type === "ancestors") {
-          const memberId = await resolveQueryMember("ancestors", "成员");
-          data = await api(`/api/members/${memberId}/ancestors`);
+          data = await api(`/api/query/ancestors?${queryMemberParams("ancestors", "成员")}`);
           out.innerHTML = table(["姓名","性别","出生年","世代","距离"], data.map(r=>[r.name, genderLabel(r.gender), r.birth_year, r.generation_num, r.generations_above]), "无祖先数据");
         } else if (type === "longevity") {
           data = await api(`/api/query/longevity?clan_id=${$("q-longevity-clan").value}`);
@@ -1251,8 +1286,7 @@ def render_app() -> str:
           data = await api(`/api/query/early_birth${Number(c) ? "?clan_id=" + c : ""}`);
           out.innerHTML = table(["ID","姓名","族谱","世代","出生年","本代均值","提前"], data.map(r=>[r.member_id, r.name, r.clan_id, r.generation_num, r.birth_year, r.avg_birth_year, r.years_before_avg]), "无符合条件成员");
         } else if (type === "descendants") {
-          const memberId = await resolveQueryMember("descendants", "成员");
-          data = await api(`/api/query/great_grandchildren?member_id=${memberId}`);
+          data = await api(`/api/query/great_grandchildren?${queryMemberParams("descendants", "成员")}`);
           out.innerHTML = table(["ID","姓名","性别","世代","出生年"], data.map(r=>[r.member_id, r.name, genderLabel(r.gender), r.generation_num, r.birth_year]), "无第四代后代");
         }
       } catch(e) { out.innerHTML = `<p style="color:var(--danger);font-size:12px;">${esc(e.message)}</p>`; }

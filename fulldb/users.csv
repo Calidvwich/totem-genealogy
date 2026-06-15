@@ -1,0 +1,4 @@
+id,user_id,password_hash,username,created_at
+1,admin,pbkdf2_sha256$150000$QxuCqUVyKn2PxOb5uxKjFQ$9Z0Dps+t2/Ka3CqGAczTcqmB/U36yNwqai6/3FxNz40,管理员,2026-06-12 17:59:24.293178
+2,test01,pbkdf2_sha256$150000$HOmdkw-B5RNmV2-WrJENeg$rNx9B4vNJeTcsYQk0H45t8Lc+WRC3/JQ1BmA5rWe6Ec,测试用户,2026-06-14 20:50:34.246286
+3,test02,pbkdf2_sha256$150000$Bx-nofKcNk2j2cpmuD2qBg$plaqLqYlFjcupyjgQmiCBtHPB0CQ/Pi26+YM1yLDASM,test02,2026-06-15 15:53:02.226863

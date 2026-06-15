@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import os
 import subprocess
 import sys
@@ -77,6 +78,138 @@ def copy_from(table, columns, path, timeout=300):
     run_tsql(["-c", statement], timeout=timeout)
 
 
+TABLE_COLUMNS = {
+    "users": ["id", "user_id", "password_hash", "username", "created_at"],
+    "genealogies": ["clan_id", "title", "surname", "revised_at", "creator_id"],
+    "collaborations": ["clan_id", "user_id"],
+    "members": ["member_id", "clan_id", "name", "gender", "birth_year", "death_year", "father_id", "mother_id", "generation_num", "bio", "id_pic"],
+    "marriages": ["marriage_id", "clan_id", "spouse_a_id", "spouse_b_id", "marry_year", "divorce_year"],
+    "member_photos": ["photo_sha256", "content_type", "content_base64", "created_at", "updated_at"],
+}
+RESTORE_ORDER = ["users", "genealogies", "collaborations", "members", "marriages", "member_photos"]
+
+
+def normalize_db_value(value):
+    if value in (None, "", "NULL"):
+        return None
+    return value
+
+
+def row_value(row, key):
+    return normalize_db_value(row.get(key))
+
+
+def count_where(table, condition):
+    return int(query_scalar("SELECT COUNT(*) FROM {} WHERE {};".format(table, condition), 0))
+
+
+def load_import_bundle(bundle_path):
+    path = Path(bundle_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("format") != "totem-genealogy-import-bundle":
+        raise ValueError("导入文件格式错误：format 必须为 totem-genealogy-import-bundle")
+    if int(data.get("format_version", 0)) != 1:
+        raise ValueError("导入文件版本不支持：{}".format(data.get("format_version")))
+    tables = data.get("tables")
+    if not isinstance(tables, dict):
+        raise ValueError("导入文件缺少 tables")
+    return data
+
+
+def validate_bundle_duplicates(bundle):
+    tables = bundle.get("tables", {})
+    duplicate_messages = []
+    seen = {}
+
+    def check_internal(table, key_fields):
+        keys = set()
+        for index, row in enumerate(tables.get(table, []), start=1):
+            key = tuple(row_value(row, field) for field in key_fields)
+            if any(value is None for value in key):
+                duplicate_messages.append("{} 第 {} 行缺少主键字段 {}".format(table, index, ",".join(key_fields)))
+                continue
+            if key in keys:
+                duplicate_messages.append("{} 导入文件内部重复：{}".format(table, key))
+            keys.add(key)
+        seen[table] = keys
+
+    check_internal("users", ["id"])
+    check_internal("genealogies", ["clan_id"])
+    check_internal("collaborations", ["clan_id", "user_id"])
+    check_internal("members", ["member_id"])
+    check_internal("marriages", ["marriage_id"])
+    check_internal("member_photos", ["photo_sha256"])
+
+    user_ids = set()
+    for row in tables.get("users", []):
+        user_id = row_value(row, "user_id")
+        if not user_id:
+            duplicate_messages.append("users 中存在空 user_id")
+        elif user_id in user_ids:
+            duplicate_messages.append("users 导入文件内部账号重复：{}".format(user_id))
+        user_ids.add(user_id)
+
+    for user_id in sorted(user_ids):
+        if count_where("users", "user_id = {}".format(sql_literal(user_id))):
+            duplicate_messages.append("数据库中已存在账号 user_id={}".format(user_id))
+
+    for key in sorted(seen.get("users", [])):
+        if count_where("users", "id = {}".format(sql_literal(key[0]))):
+            duplicate_messages.append("数据库中已存在 users.id={}".format(key[0]))
+    for key in sorted(seen.get("genealogies", [])):
+        if count_where("genealogies", "clan_id = {}".format(sql_literal(key[0]))):
+            duplicate_messages.append("数据库中已存在 genealogies.clan_id={}".format(key[0]))
+    for key in sorted(seen.get("members", [])):
+        if count_where("members", "member_id = {}".format(sql_literal(key[0]))):
+            duplicate_messages.append("数据库中已存在 members.member_id={}".format(key[0]))
+    for key in sorted(seen.get("marriages", [])):
+        if count_where("marriages", "marriage_id = {}".format(sql_literal(key[0]))):
+            duplicate_messages.append("数据库中已存在 marriages.marriage_id={}".format(key[0]))
+    for key in sorted(seen.get("member_photos", [])):
+        if count_where("member_photos", "photo_sha256 = {}".format(sql_literal(key[0]))):
+            duplicate_messages.append("数据库中已存在 member_photos.photo_sha256={}".format(key[0]))
+    for key in sorted(seen.get("collaborations", [])):
+        if count_where("collaborations", "clan_id = {} AND user_id = {}".format(sql_literal(key[0]), sql_literal(key[1]))):
+            duplicate_messages.append("数据库中已存在 collaborations(clan_id={}, user_id={})".format(key[0], key[1]))
+
+    if duplicate_messages:
+        raise ValueError("导入停止，发现重复或无效数据：\n- " + "\n- ".join(duplicate_messages[:50]))
+
+
+def insert_rows(table, rows):
+    if not rows:
+        return 0
+    columns = TABLE_COLUMNS[table]
+    for row in rows:
+        values = [sql_literal(row_value(row, column)) for column in columns]
+        execute(
+            "INSERT INTO {}({}) VALUES ({});".format(
+                table,
+                ",".join(columns),
+                ",".join(values),
+            )
+        )
+    return len(rows)
+
+
+def import_bundle(bundle_path, reset=False):
+    bundle = load_import_bundle(bundle_path)
+    if reset:
+        reset_all_data()
+    validate_bundle_duplicates(bundle)
+    tables = bundle["tables"]
+    inserted = {}
+    for table in RESTORE_ORDER:
+        inserted[table] = insert_rows(table, tables.get(table, []))
+    return {
+        "ok": True,
+        "mode": "restore",
+        "bundle": str(bundle_path),
+        "manifest": bundle.get("manifest", {}),
+        "inserted": inserted,
+    }
+
+
 def ensure_generated_files(total=None):
     if total is not None or not all(path.exists() for path in GENERATED_FILES.values()):
         command = [sys.executable, str(APP_DIR / "generate_data.py")]
@@ -90,6 +223,15 @@ def reset_genealogy_data():
     execute("DELETE FROM members;")
     execute("DELETE FROM collaborations;")
     execute("DELETE FROM genealogies;")
+
+
+def reset_all_data():
+    execute("DELETE FROM marriages;")
+    execute("DELETE FROM members;")
+    execute("DELETE FROM collaborations;")
+    execute("DELETE FROM genealogies;")
+    execute("DELETE FROM member_photos;")
+    execute("DELETE FROM users;")
 
 
 def import_generated_data(total=None, reset=True, creator_user_id="admin"):
@@ -251,13 +393,23 @@ def main():
     csv_parser.add_argument("--surname", default="")
     csv_parser.add_argument("--creator", default="admin")
 
+    restore_parser = subparsers.add_parser("restore", help="导入 export.py 生成的 import_bundle.json")
+    restore_parser.add_argument("bundle_path")
+    restore_parser.add_argument("--reset", action="store_true", help="导入前清空 users/genealogies/collaborations/members/marriages/member_photos")
+
     args = parser.parse_args()
-    if args.command == "generated":
-        print(import_generated_data(total=args.total, reset=not args.append, creator_user_id=args.creator))
-    elif args.command == "csv":
-        print(import_clan_csv(args.csv_path, args.title, args.surname, args.creator))
-    else:
-        parser.print_help()
+    try:
+        if args.command == "generated":
+            print(import_generated_data(total=args.total, reset=not args.append, creator_user_id=args.creator))
+        elif args.command == "csv":
+            print(import_clan_csv(args.csv_path, args.title, args.surname, args.creator))
+        elif args.command == "restore":
+            print(import_bundle(args.bundle_path, reset=args.reset))
+        else:
+            parser.print_help()
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

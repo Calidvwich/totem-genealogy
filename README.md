@@ -115,16 +115,22 @@ main.py                         FastAPI 后端与业务服务
 interface.py                    单页 Web 界面
 init_db.sql                     初始化表结构
 generate_data.py                大规模测试数据生成
-import.py                       导入 CSV 或生成数据
-export.py                       导出数据库、族谱、成员
+import.py                       导入 CSV、生成数据或 import_bundle.json
+export.py                       导出数据库、族谱、成员和可恢复导入包
+logsave.py                      静默记录错误日志和用户操作日志
 load_db.py                      兼容旧流程的数据导入脚本
 migrate_passwords.py            明文密码迁移脚本
 ensure_test_user.py             测试账号修复脚本
+inout.md                        导入导出文件格式与路径说明
+explain.md                      索引设计与性能模式说明
 config/startup/startup.json     一键启动参数
 scripts/start-genealogy.ps1     一键启动脚本
 output/import/                  上传导入中转目录
 output/export/                  导出结果
 output/performance-test/        EXPLAIN 输出
+fulldb/                         当前完整数据库导出与恢复说明
+log/errorlog.txt                错误/崩溃日志，本地运行生成
+log/userlog/                    用户单次登录操作日志，本地运行生成
 resources/defaultpic.jpg        默认头像
 ```
 

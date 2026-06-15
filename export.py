@@ -76,6 +76,30 @@ def write_dict_rows(path, headers, rows):
         writer.writerows(rows)
 
 
+def read_csv_dict(path):
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def write_import_bundle(target, manifest):
+    tables = {}
+    for table_name in ("users", "genealogies", "collaborations", "members", "marriages", "member_photos"):
+        csv_path = target / (table_name + ".csv")
+        if csv_path.exists():
+            tables[table_name] = read_csv_dict(csv_path)
+    bundle = {
+        "format": "totem-genealogy-import-bundle",
+        "format_version": 1,
+        "manifest": manifest,
+        "tables": tables,
+    }
+    bundle_path = target / "import_bundle.json"
+    bundle_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+    return bundle_path
+
+
 def export_member_ancestors(member_id, path):
     headers = ["member_id", "name", "gender", "birth_year", "death_year", "father_id", "mother_id", "generation_num", "depth"]
     result = []
@@ -126,7 +150,9 @@ def export_database(output_dir=None):
         "database": DATABASE,
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "files": files,
+        "import_file": "import_bundle.json",
     }
+    write_import_bundle(target, manifest)
     (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"ok": True, "type": "database", "output_dir": str(target)}
 
@@ -166,7 +192,9 @@ def export_clans(clan_ids, output_dir=None):
         "clan_ids": sorted(set(ids)),
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "files": files,
+        "import_file": "import_bundle.json",
     }
+    write_import_bundle(target, manifest)
     (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"ok": True, "type": "clans", "clan_ids": sorted(set(ids)), "output_dir": str(target)}
 
