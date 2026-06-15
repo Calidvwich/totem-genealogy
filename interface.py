@@ -308,19 +308,19 @@ def render_app() -> str:
         <button id="qt-early" onclick="switchQueryTab('early')">早于均值</button>
         <button id="qt-descendants" onclick="switchQueryTab('descendants')">四代曾孙</button>
       </div>
-      <div id="qp-spouse"><input id="q-spouse-id" type="number" placeholder="成员 ID"><button class="btn-primary" onclick="runQuery('spouse')" style="width:100%">查询</button><div id="qr-spouse"></div></div>
-      <div id="qp-ancestors" style="display:none"><input id="q-ancestors-id" type="number" placeholder="成员 ID"><button class="btn-primary" onclick="runQuery('ancestors')" style="width:100%">查询</button><div id="qr-ancestors"></div></div>
+      <div id="qp-spouse"><input id="q-spouse-name" type="text" placeholder="成员姓名"><input id="q-spouse-id" type="number" placeholder="重名时填写成员 ID"><button class="btn-primary" onclick="runQuery('spouse')" style="width:100%">查询</button><div id="qr-spouse"></div></div>
+      <div id="qp-ancestors" style="display:none"><input id="q-ancestors-name" type="text" placeholder="成员姓名"><input id="q-ancestors-id" type="number" placeholder="重名时填写成员 ID"><button class="btn-primary" onclick="runQuery('ancestors')" style="width:100%">查询</button><div id="qr-ancestors"></div></div>
       <div id="qp-longevity" style="display:none"><select id="q-longevity-clan"></select><button class="btn-primary" onclick="runQuery('longevity')" style="width:100%">查询</button><div id="qr-longevity"></div></div>
       <div id="qp-singles" style="display:none"><select id="q-singles-clan"></select><button class="btn-primary" onclick="runQuery('singles')" style="width:100%">查询</button><div id="qr-singles"></div></div>
       <div id="qp-early" style="display:none"><select id="q-early-clan"></select><button class="btn-primary" onclick="runQuery('early')" style="width:100%">查询</button><div id="qr-early"></div></div>
-      <div id="qp-descendants" style="display:none"><input id="q-descendants-name" type="text" placeholder="成员姓名"><button class="btn-primary" onclick="runQuery('descendants')" style="width:100%">查询</button><div id="qr-descendants"></div></div>
+      <div id="qp-descendants" style="display:none"><input id="q-descendants-name" type="text" placeholder="成员姓名"><input id="q-descendants-id" type="number" placeholder="重名时填写成员 ID"><button class="btn-primary" onclick="runQuery('descendants')" style="width:100%">查询</button><div id="qr-descendants"></div></div>
       <div class="modal-footer"><button class="btn-cancel" onclick="closeModal('queryModal')">关闭</button></div>
     </div>
   </div>
 
   <script>
     let myChart = null, pieChart = null;
-    const state = { user:null, clans:[], users:[], currentClanId:0, currentPerm:{can_edit:false,is_owner:false}, currentTreeMemberId:null, currentDetailMemberId:null, treeZoom:1 };
+    const state = { user:null, clans:[], users:[], currentClanId:0, currentPerm:{can_edit:false,is_owner:false}, currentTreeMemberId:null, currentDetailMemberId:null, treeZoom:1, treeRoots:[] };
     const $ = (id) => document.getElementById(id);
     const esc = (v) => (v == null ? "" : String(v)).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
     const num = (v) => v === "" || v == null ? null : Number(v);
@@ -578,8 +578,63 @@ def render_app() -> str:
       };
       return build(member);
     }
+    function treeGenderColor(g) {
+      return g === "F" ? "#ec4899" : g === "M" ? "#2563eb" : "#94a3b8";
+    }
     function toChartNode(n) {
-      return {name:n.name || `#${n.member_id}`, member_id:n.member_id, generation:n.generation_num, birth_year:n.birth_year, itemStyle:{color:n.gender==="F" ? "#10b981" : n.gender==="U" ? "#94a3b8" : "#2563eb"}, children:(n.children || []).map(toChartNode)};
+      const color = treeGenderColor(n.gender);
+      return {
+        name:n.name || `#${n.member_id}`,
+        member_id:n.member_id,
+        gender:n.gender,
+        generation:n.generation_num,
+        birth_year:n.birth_year,
+        collapsed:n.collapsed === true,
+        itemStyle:{color, borderColor:"#ffffff", borderWidth:2},
+        label:{borderColor:color},
+        children:(n.children || []).map(toChartNode)
+      };
+    }
+    function findTreeNode(nodes, memberId) {
+      for (const node of nodes || []) {
+        if (Number(node.member_id) === Number(memberId)) return node;
+        const found = findTreeNode(node.children || [], memberId);
+        if (found) return found;
+      }
+      return null;
+    }
+    function isTreeLabelClick(params) {
+      let target = params && params.event ? params.event.target : null;
+      while (target) {
+        if (target.type === "text") return true;
+        target = target.parent;
+      }
+      return false;
+    }
+    function applyTreeOption() {
+      if (!myChart) return;
+      myChart.setOption({
+        tooltip:{trigger:"item",triggerOn:"mousemove",formatter:p=>`<b>${esc(p.data.name)}</b><br>成员ID：${p.data.member_id || "-"}<br>性别：${genderLabel(p.data.gender)}<br>世代：${p.data.generation || "-"}<br>生年：${p.data.birth_year || "-"}`},
+        series:[{
+          type:"tree",
+          data:state.treeRoots,
+          top:"8%",
+          left:"12%",
+          bottom:"8%",
+          right:"12%",
+          orient:"RL",
+          roam:true,
+          zoom:state.treeZoom,
+          expandAndCollapse:false,
+          initialTreeDepth:12,
+          symbol:"circle",
+          symbolSize:14,
+          label:{position:"right", align:"left", verticalAlign:"middle", color:"#334155", backgroundColor:"rgba(255,255,255,.92)", borderColor:"#dbeafe", borderWidth:1.5, borderRadius:6, padding:[5,9], cursor:"pointer"},
+          leaves:{label:{position:"left", align:"right"}},
+          lineStyle:{color:"#93c5fd", width:1.5, curveness:.35},
+          emphasis:{focus:"ancestor"}
+        }]
+      }, true);
     }
     function renderTree(roots) {
       if (!window.echarts) return;
@@ -588,9 +643,21 @@ def render_app() -> str:
         myChart = echarts.init($("chart-container"));
       }
       state.treeZoom = 1;
-      myChart.setOption({tooltip:{trigger:"item",triggerOn:"mousemove",formatter:p=>`<b>${esc(p.data.name)}</b><br>成员ID：${p.data.member_id || "-"}<br>世代：${p.data.generation || "-"}<br>生年：${p.data.birth_year || "-"}`}, series:[{type:"tree", data:roots.map(toChartNode), top:"8%", left:"12%", bottom:"8%", right:"12%", orient:"RL", roam:true, zoom:state.treeZoom, expandAndCollapse:true, initialTreeDepth:8, symbol:"circle", symbolSize:10, label:{position:"right", align:"left", verticalAlign:"middle", color:"#334155", backgroundColor:"rgba(255,255,255,.86)", borderColor:"#dbeafe", borderWidth:1, borderRadius:5, padding:[4,7]}, leaves:{label:{position:"left", align:"right"}}, lineStyle:{color:"#93c5fd", width:1.5, curveness:.35}, emphasis:{focus:"ancestor"}}]}, true);
+      state.treeRoots = roots.map(toChartNode);
+      applyTreeOption();
       myChart.off("click");
-      myChart.on("click", p => { if (p.data && p.data.member_id) openDetail(p.data.member_id); });
+      myChart.on("click", p => {
+        if (!p.data || !p.data.member_id) return;
+        if (isTreeLabelClick(p)) {
+          openDetail(p.data.member_id);
+          return;
+        }
+        const node = findTreeNode(state.treeRoots, p.data.member_id);
+        if (node && node.children && node.children.length) {
+          node.collapsed = !node.collapsed;
+          applyTreeOption();
+        }
+      });
       setTimeout(()=>myChart && myChart.resize(), 50);
     }
     function zoomTree(factor) {
@@ -1137,16 +1204,40 @@ def render_app() -> str:
       if (!rows.length) return `<p class="notice">${empty}</p>`;
       return `<table class="query-result-table"><thead><tr>${headers.map(h=>`<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${esc(c == null || c === "" ? "—" : c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
     }
+    async function resolveQueryMember(type, label) {
+      const nameEl = $(`q-${type}-name`);
+      const idEl = $(`q-${type}-id`);
+      const name = nameEl ? nameEl.value.trim() : "";
+      const explicitId = idEl ? num(idEl.value) : null;
+      if (explicitId) {
+        if (name) {
+          const detail = await api(`/api/members/${explicitId}/detail`);
+          const m = detail.member || {};
+          if (m.name !== name) throw new Error(`${label}确认 ID 对应姓名为 ${m.name}，不是 ${name}`);
+        }
+        return explicitId;
+      }
+      if (!name) throw new Error(`请输入${label}姓名`);
+      const matches = (await api(`/api/members?clan_id=0&q=${encodeURIComponent(name)}`)).filter(m => m.name === name);
+      if (!matches.length) throw new Error(`未找到${label}：${name}`);
+      if (matches.length > 1) {
+        const choices = matches.slice(0, 10).map(m => `${m.name} #${m.member_id}（族谱 ${m.clan_id}，${genderLabel(m.gender)}，第${m.generation_num || "-"}代）`).join("；");
+        throw new Error(`${label}存在重名，请填写具体 ID：${choices}`);
+      }
+      return Number(matches[0].member_id);
+    }
     async function runQuery(type) {
       const out = $("qr-" + type);
       out.innerHTML = "<p class='notice'>查询中...</p>";
       try {
         let data;
         if (type === "spouse") {
-          data = await api(`/api/query/spouse_children?member_id=${$("q-spouse-id").value}`);
+          const memberId = await resolveQueryMember("spouse", "成员");
+          data = await api(`/api/query/spouse_children?member_id=${memberId}`);
           out.innerHTML = "<h4>配偶</h4>" + table(["姓名","性别","出生年"], data.spouses.map(s=>[s.name, genderLabel(s.gender), s.birth_year]), "暂无配偶") + "<h4>子女</h4>" + table(["姓名","性别","出生年","世代"], data.children.map(c=>[c.name, genderLabel(c.gender), c.birth_year, c.generation_num]), "暂无子女");
         } else if (type === "ancestors") {
-          data = await api(`/api/members/${$("q-ancestors-id").value}/ancestors`);
+          const memberId = await resolveQueryMember("ancestors", "成员");
+          data = await api(`/api/members/${memberId}/ancestors`);
           out.innerHTML = table(["姓名","性别","出生年","世代","距离"], data.map(r=>[r.name, genderLabel(r.gender), r.birth_year, r.generation_num, r.generations_above]), "无祖先数据");
         } else if (type === "longevity") {
           data = await api(`/api/query/longevity?clan_id=${$("q-longevity-clan").value}`);
@@ -1160,12 +1251,8 @@ def render_app() -> str:
           data = await api(`/api/query/early_birth${Number(c) ? "?clan_id=" + c : ""}`);
           out.innerHTML = table(["ID","姓名","族谱","世代","出生年","本代均值","提前"], data.map(r=>[r.member_id, r.name, r.clan_id, r.generation_num, r.birth_year, r.avg_birth_year, r.years_before_avg]), "无符合条件成员");
         } else if (type === "descendants") {
-          const name = $("q-descendants-name").value.trim();
-          if (!name) {
-            out.innerHTML = "<p style='color:var(--danger);font-size:12px;'>请输入成员姓名</p>";
-            return;
-          }
-          data = await api(`/api/query/great_grandchildren?name=${encodeURIComponent(name)}`);
+          const memberId = await resolveQueryMember("descendants", "成员");
+          data = await api(`/api/query/great_grandchildren?member_id=${memberId}`);
           out.innerHTML = table(["ID","姓名","性别","世代","出生年"], data.map(r=>[r.member_id, r.name, genderLabel(r.gender), r.generation_num, r.birth_year]), "无第四代后代");
         }
       } catch(e) { out.innerHTML = `<p style="color:var(--danger);font-size:12px;">${esc(e.message)}</p>`; }
