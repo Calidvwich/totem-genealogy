@@ -78,12 +78,25 @@ def render_app() -> str:
 <body>
   <div id="loginOverlay">
     <div class="login-card">
-      <h2>系统登录</h2>
-      <input type="text" id="login_uid" value="admin" placeholder="账号" autocomplete="username">
-      <input type="password" id="login_pwd" value="123456" placeholder="密码" autocomplete="current-password">
-      <div id="loginMsg" class="notice" style="text-align:center;color:var(--danger)"></div>
-      <button class="btn-add" onclick="handleLogin()">进入系统</button>
-      <p>默认账号 admin / 123456，普通测试账号 test01 / 123456</p>
+      <div id="loginPanel">
+        <h2>系统登录</h2>
+        <input type="text" id="login_uid" value="admin" placeholder="账号" autocomplete="username">
+        <input type="password" id="login_pwd" value="123456" placeholder="密码" autocomplete="current-password">
+        <div id="loginMsg" class="notice" style="text-align:center;color:var(--danger)"></div>
+        <button class="btn-add" onclick="handleLogin()">进入系统</button>
+        <p>默认账号 admin / 123456，普通测试账号 test01 / 123456</p>
+        <p style="margin-top:10px;"><a href="#" onclick="switchToRegister();return false;" style="color:var(--primary);font-size:13px;">没有账号？点此注册</a></p>
+      </div>
+      <div id="registerPanel" style="display:none;">
+        <h2>注册账号</h2>
+        <input type="text" id="reg_uid" placeholder="账号（4-20位字母数字）" autocomplete="username">
+        <input type="text" id="reg_name" placeholder="显示名称（可选）">
+        <input type="password" id="reg_pwd" placeholder="密码" autocomplete="new-password">
+        <input type="password" id="reg_pwd2" placeholder="确认密码" autocomplete="new-password">
+        <div id="registerMsg" class="notice" style="text-align:center;color:var(--danger)"></div>
+        <button class="btn-add" onclick="handleRegister()">注册</button>
+        <p style="margin-top:10px;"><a href="#" onclick="switchToLogin();return false;" style="color:var(--primary);font-size:13px;">已有账号？返回登录</a></p>
+      </div>
     </div>
   </div>
 
@@ -100,7 +113,7 @@ def render_app() -> str:
         <button class="btn-sm" style="background:var(--success)" onclick="openImportModal()">导入族谱</button>
         <button class="btn-sm" style="background:var(--cyan)" onclick="openExportModal()">导出族谱</button>
         <button class="btn-cyan" onclick="openQueryModal()">统计查询</button>
-        <button class="btn-violet" onclick="toggleUserView()">用户管理</button>
+        <button id="userManageBtn" class="btn-violet" onclick="toggleUserView()">用户管理</button>
         <button class="btn-ghost" onclick="logout()">退出</button>
       </div>
     </div>
@@ -182,8 +195,12 @@ def render_app() -> str:
       <label>性别</label><select id="member_gender"><option value="M">男</option><option value="F">女</option><option value="U">未知</option></select>
       <label>出生年</label><input type="number" id="member_birth">
       <label>死亡年</label><input type="number" id="member_death">
-      <label>父亲 ID</label><input type="number" id="member_father">
-      <label>母亲 ID</label><input type="number" id="member_mother">
+      <label>父亲姓名</label><input id="member_father_name" placeholder="先输入姓名，重名时再填写确认 ID">
+      <label>父亲重名确认 ID</label><input type="number" id="member_father_id" placeholder="只有重名或需要精确指定时填写">
+      <label>母亲姓名</label><input id="member_mother_name" placeholder="先输入姓名，重名时再填写确认 ID">
+      <label>母亲重名确认 ID</label><input type="number" id="member_mother_id" placeholder="只有重名或需要精确指定时填写">
+      <label>添加/确认子女姓名</label><input id="member_child_name" placeholder="编辑已有成员时可按姓名添加子女关系">
+      <label>子女重名确认 ID</label><input type="number" id="member_child_id" placeholder="只有重名或需要精确指定时填写">
       <label>世代</label><input type="number" id="member_generation">
       <label>简介</label><textarea id="member_bio"></textarea>
       <label>照片</label><input type="file" id="member_photo" accept="image/*">
@@ -310,13 +327,32 @@ def render_app() -> str:
     const formatDate = (v) => v ? String(v).replace("T", " ").slice(0, 19) : "-";
     const actorId = () => state.user ? state.user.user_id : "";
     const actorParam = () => `current_user_id=${encodeURIComponent(actorId())}`;
+    function fieldName(name) {
+      const map = {user_id:"账号", password:"密码", username:"用户名", title:"标题", name:"姓名"};
+      return map[name] || name;
+    }
+    function formatApiError(detail) {
+      if (!detail) return "请求失败";
+      if (typeof detail === "string") return detail;
+      if (Array.isArray(detail)) {
+        return detail.map(item => {
+          const loc = Array.isArray(item.loc) ? item.loc[item.loc.length - 1] : "";
+          const msg = item.msg || "填写不正确";
+          return `${fieldName(loc)}：${msg}`;
+        }).join("；");
+      }
+      if (typeof detail === "object") {
+        return detail.message || detail.msg || JSON.stringify(detail);
+      }
+      return String(detail);
+    }
     async function api(url, options={}) {
       const headers = options.body instanceof FormData ? {} : {"Content-Type":"application/json"};
       const res = await fetch(url, {headers, ...options});
       if (!res.ok) {
         let detail = "请求失败";
         try { detail = (await res.json()).detail || detail; } catch(e) {}
-        throw new Error(detail);
+        throw new Error(formatApiError(detail));
       }
       if (res.status === 204) return null;
       return res.json();
@@ -324,15 +360,60 @@ def render_app() -> str:
 
     async function handleLogin() {
       const msg = $("loginMsg");
+      const userId = $("login_uid").value.trim();
+      const password = $("login_pwd").value;
+      msg.style.color = "var(--danger)";
+      if (!userId) return msg.textContent = "请填写账号";
+      if (!password) return msg.textContent = "请填写密码";
       try {
         msg.textContent = "验证中...";
-        const data = await api("/api/login", {method:"POST", body:JSON.stringify({user_id:$("login_uid").value, password:$("login_pwd").value})});
+        const data = await api("/api/login", {method:"POST", body:JSON.stringify({user_id:userId, password:password})});
         state.user = data.user;
         $("currentUserLabel").textContent = `${data.user.username || data.user.user_id} | 已登录`;
+        $("userManageBtn").style.display = actorId() === "admin" ? "" : "none";
         $("loginOverlay").style.display = "none";
         $("adminContent").style.display = "flex";
         await initApp();
       } catch(e) { msg.textContent = e.message; }
+    }
+    function switchToRegister() {
+      $("loginPanel").style.display = "none";
+      $("registerPanel").style.display = "";
+      $("registerMsg").textContent = "";
+      $("reg_uid").value = "";
+      $("reg_name").value = "";
+      $("reg_pwd").value = "";
+      $("reg_pwd2").value = "";
+    }
+    function switchToLogin() {
+      $("registerPanel").style.display = "none";
+      $("loginPanel").style.display = "";
+      $("loginMsg").textContent = "";
+    }
+    async function handleRegister() {
+      const msg = $("registerMsg");
+      const userId = $("reg_uid").value.trim();
+      const username = $("reg_name").value.trim();
+      const pwd = $("reg_pwd").value;
+      const pwd2 = $("reg_pwd2").value;
+      msg.style.color = "var(--danger)";
+      if (!userId) return msg.textContent = "请填写账号";
+      if (userId.length < 4) return msg.textContent = "账号至少 4 位";
+      if (!pwd) return msg.textContent = "请填写密码";
+      if (pwd !== pwd2) return msg.textContent = "两次密码不一致";
+      try {
+        msg.style.color = "#64748b";
+        msg.textContent = "注册中...";
+        await api("/api/register", {method:"POST", body:JSON.stringify({user_id:userId, password:pwd, username:username||userId})});
+        $("login_uid").value = userId;
+        $("login_pwd").value = "";
+        switchToLogin();
+        $("loginMsg").style.color = "var(--success)";
+        $("loginMsg").textContent = "注册成功，请使用新账号登录";
+      } catch(e) {
+        msg.style.color = "var(--danger)";
+        msg.textContent = e.message;
+      }
     }
     async function logout() {
       state.user = null;
@@ -341,6 +422,7 @@ def render_app() -> str:
       if (pieChart) pieChart.clear();
       $("adminContent").style.display = "none";
       $("loginOverlay").style.display = "flex";
+      $("userManageBtn").style.display = "";
       $("login_pwd").value = "";
       $("loginMsg").textContent = "";
     }
@@ -549,6 +631,7 @@ def render_app() -> str:
       if (open) loadClans();
     }
     function toggleUserView() {
+      if (actorId() !== "admin") return;
       const open = $("user-view").style.display !== "flex";
       $("user-view").style.display = open ? "flex" : "none";
       $("search-view").style.display = open ? "none" : "flex";
@@ -596,7 +679,7 @@ def render_app() -> str:
     }
 
     async function loadUsers() {
-      state.users = await api("/api/users");
+      state.users = await api(`/api/users?${actorParam()}`);
       $("user-list").innerHTML = state.users.map(u => `<div class="member-item">
         <div class="member-item-left" onclick="openUserDetail(${u.id})">
           <strong>${esc(u.username || u.user_id)}</strong>
@@ -621,7 +704,7 @@ def render_app() -> str:
     }
     async function openUserDetail(id) {
       try {
-        const data = await api(`/api/users/${id}/detail`);
+        const data = await api(`/api/users/${id}/detail?${actorParam()}`);
         const u = data.user || {};
         $("userDetailTitle").textContent = `${u.username || u.user_id || "用户"} #${u.id}`;
         $("userDetailBody").innerHTML = `
@@ -817,8 +900,12 @@ def render_app() -> str:
         $("member_gender").value = m.gender || "U";
         $("member_birth").value = m.birth_year || "";
         $("member_death").value = m.death_year || "";
-        $("member_father").value = m.father_id || "";
-        $("member_mother").value = m.mother_id || "";
+        $("member_father_name").value = d.father ? d.father.name || "" : "";
+        $("member_father_id").value = "";
+        $("member_mother_name").value = d.mother ? d.mother.name || "" : "";
+        $("member_mother_id").value = "";
+        $("member_child_name").value = "";
+        $("member_child_id").value = "";
         $("member_generation").value = m.generation_num || "";
         $("member_bio").value = m.bio || "";
         $("memberMsg").textContent = "";
@@ -826,18 +913,72 @@ def render_app() -> str:
       } catch(e) { alert(e.message); }
     }
     function clearMemberForm() {
-      ["member_id","member_name","member_birth","member_death","member_father","member_mother","member_generation","member_bio"].forEach(id => $(id).value = "");
+      ["member_id","member_name","member_birth","member_death","member_father_name","member_father_id","member_mother_name","member_mother_id","member_child_name","member_child_id","member_generation","member_bio"].forEach(id => $(id).value = "");
       $("member_gender").value = "U";
       $("member_clan").disabled = false;
       $("member_photo").value = "";
       $("memberMsg").textContent = "";
     }
+    async function resolveMemberByName(clanId, name, confirmId, role, gender) {
+      const keyword = (name || "").trim();
+      const explicitId = num(confirmId);
+      if (!keyword && !explicitId) return null;
+      let matches = [];
+      if (explicitId) {
+        try {
+          const detail = await api(`/api/members/${explicitId}/detail`);
+          const m = detail.member || {};
+          if (Number(m.clan_id) !== Number(clanId)) throw new Error(`${role}确认 ID 不属于当前族谱`);
+          if (gender && m.gender !== gender) throw new Error(`${role}性别不符合要求`);
+          if (keyword && m.name !== keyword) throw new Error(`${role}确认 ID 对应姓名为 ${m.name}，不是 ${keyword}`);
+          return Number(m.member_id);
+        } catch(e) {
+          throw new Error(`${role}确认 ID 无效：${e.message}`);
+        }
+      }
+      matches = await api(`/api/members?clan_id=${encodeURIComponent(clanId)}&q=${encodeURIComponent(keyword)}`);
+      matches = matches.filter(m => m.name === keyword && (!gender || m.gender === gender));
+      if (!matches.length) throw new Error(`未找到${role}：${keyword}`);
+      if (matches.length > 1) {
+        const choices = matches.slice(0, 8).map(m => `${m.name} #${m.member_id}（${genderLabel(m.gender)}，第${m.generation_num || "-"}代）`).join("；");
+        throw new Error(`${role}存在重名，请填写确认 ID：${choices}`);
+      }
+      return Number(matches[0].member_id);
+    }
+    async function attachChildIfNeeded(parentId, parentGender, clanId) {
+      const childName = $("member_child_name").value.trim();
+      const childConfirmId = $("member_child_id").value;
+      if (!childName && !childConfirmId) return;
+      if (!parentId) throw new Error("添加子女关系需要先保存当前成员");
+      if (parentGender !== "M" && parentGender !== "F") throw new Error("当前成员性别未知，无法判断应作为父亲还是母亲");
+      const childId = await resolveMemberByName(clanId, childName, childConfirmId, "子女", "");
+      if (Number(childId) === Number(parentId)) throw new Error("子女不能是当前成员本人");
+      const childDetail = await api(`/api/members/${childId}/detail`);
+      const child = childDetail.member || {};
+      const update = {
+        name: child.name,
+        gender: child.gender,
+        birth_year: num(child.birth_year),
+        death_year: num(child.death_year),
+        father_id: num(child.father_id),
+        mother_id: num(child.mother_id),
+        generation_num: num(child.generation_num),
+        bio: child.bio || ""
+      };
+      if (parentGender === "M") update.father_id = Number(parentId);
+      if (parentGender === "F") update.mother_id = Number(parentId);
+      await api(`/api/members/${childId}?${actorParam()}`, {method:"PUT", body:JSON.stringify(update)});
+    }
     async function submitMember() {
       try {
         const id = $("member_id").value;
-        const payload = {clan_id:Number($("member_clan").value), name:$("member_name").value, gender:$("member_gender").value, birth_year:num($("member_birth").value), death_year:num($("member_death").value), father_id:num($("member_father").value), mother_id:num($("member_mother").value), generation_num:num($("member_generation").value), bio:$("member_bio").value};
+        const clanId = Number($("member_clan").value);
+        const fatherId = await resolveMemberByName(clanId, $("member_father_name").value, $("member_father_id").value, "父亲", "M");
+        const motherId = await resolveMemberByName(clanId, $("member_mother_name").value, $("member_mother_id").value, "母亲", "F");
+        const payload = {clan_id:clanId, name:$("member_name").value, gender:$("member_gender").value, birth_year:num($("member_birth").value), death_year:num($("member_death").value), father_id:fatherId, mother_id:motherId, generation_num:num($("member_generation").value), bio:$("member_bio").value};
         const saved = await api(id ? `/api/members/${id}?${actorParam()}` : `/api/members?${actorParam()}`, {method:id ? "PUT" : "POST", body:JSON.stringify(payload)});
         const memberId = saved.member_id || id;
+        await attachChildIfNeeded(memberId, payload.gender, clanId);
         if ($("member_photo").files.length) {
           const form = new FormData(); form.append("photo", $("member_photo").files[0]);
           await api(`/api/members/${memberId}/photo?${actorParam()}`, {method:"POST", body:form});

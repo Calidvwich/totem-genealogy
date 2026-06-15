@@ -2071,13 +2071,23 @@ def login(payload: LoginRequest) -> Dict[str, Any]:
     return service.authenticate(payload.user_id, payload.password)
 
 
+@app.post("/api/register", status_code=201)
+def register(payload: UserIn) -> Dict[str, Any]:
+    """Public self-registration endpoint. Anyone can create a non-admin account."""
+    if payload.user_id.lower() == "admin":
+        raise HTTPException(status_code=400, detail="admin 账号不能通过公开注册创建")
+    return service.create_user(payload)
+
+
 @app.get("/api/users")
-def list_users() -> List[Dict[str, Any]]:
+def list_users(current_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    require_admin(current_user_id)
     return service.users()
 
 
 @app.get("/api/users/{user_id}/detail")
-def user_detail(user_id: int) -> Dict[str, Any]:
+def user_detail(user_id: int, current_user_id: Optional[str] = None) -> Dict[str, Any]:
+    require_admin(current_user_id)
     return service.user_detail(user_id)
 
 
