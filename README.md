@@ -121,8 +121,13 @@ logsave.py                      静默记录错误日志和用户操作日志
 load_db.py                      兼容旧流程的数据导入脚本
 migrate_passwords.py            明文密码迁移脚本
 ensure_test_user.py             测试账号修复脚本
-inout.md                        导入导出文件格式与路径说明
-explain.md                      索引设计与性能模式说明
+instructions/                   项目说明文档目录（环境、查询、导入导出、索引、待办等）
+instructions/env.md             环境配置说明
+instructions/inout.md           导入导出文件格式与路径说明
+instructions/explain.md         索引设计与性能模式说明
+instructions/queries.md         查询需求与 SQL 说明
+instructions/property.md        数据库属性与设计说明
+instructions/todo.md            需求清单与完成情况
 config/startup/startup.json     一键启动参数
 scripts/start-genealogy.ps1     一键启动脚本
 output/import/                  上传导入中转目录
