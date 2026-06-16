@@ -1,5 +1,6 @@
 param(
-    [switch]$CheckOnly
+    [switch]$CheckOnly,
+    [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +57,37 @@ function Invoke-WslBash {
     return [int]$ExitCode
 }
 
+function Test-WindowsHttp {
+    param([string]$Port)
+    try {
+        $Response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/" -TimeoutSec 5
+        return ($Response.StatusCode -ge 200 -and $Response.StatusCode -lt 500)
+    } catch {
+        return $false
+    }
+}
+
+function Get-WslConfigWarning {
+    $WslConfig = Join-Path $env:USERPROFILE ".wslconfig"
+    if (-not (Test-Path $WslConfig)) {
+        return ""
+    }
+    $Text = Get-Content $WslConfig -Raw
+    if ($Text -match "(?im)^\s*networkingMode\s*=\s*mirrored\s*$") {
+        return @"
+Detected networkingMode=mirrored in $WslConfig.
+This WSL installation is currently warning that mirrored networking is ignored,
+which can leave FastAPI reachable inside WSL but unreachable from Windows localhost.
+Recommended fix in Windows PowerShell:
+  copy "$WslConfig" "$WslConfig.bak"
+  Set-Content "$WslConfig" "[wsl2]`nlocalhostForwarding=true"
+  wsl --shutdown
+Then run start-genealogy.bat again.
+"@
+    }
+    return ""
+}
+
 function Build-TsqlArgs {
     $Tsql = Join-WslPath $Config.totem.bin_dir "tsql"
     $Parts = @(
@@ -108,6 +140,9 @@ if ($CheckOnly) {
 
 Write-Host "Starting FastAPI with uvicorn..."
 Write-Host "Open http://localhost:$($Config.app.port) after startup."
+if (-not $NoRestart) {
+    Write-Host "Existing FastAPI process from the pid file will be restarted to avoid stale code."
+}
 
 $ReloadFlag = @()
 if ($Config.app.reload -eq $true) {
@@ -141,8 +176,18 @@ $UvicornCommand = @(
 if ($Config.app.background -eq $true) {
     $PidFile = Quote-Bash $Config.app.pid_file
     $LogFile = Quote-Bash $Config.app.log_file
+    $RestartFlag = if ($NoRestart) { "1" } else { "0" }
     $HealthCheck = (Quote-Bash $Config.app.python) + " -c " + (Quote-Bash ("import urllib.request; urllib.request.urlopen('http://127.0.0.1:" + $Config.app.port + "', timeout=5).read(1)"))
     $StartWeb = @(
+        "if [ $RestartFlag -eq 0 ] && [ -f $PidFile ] && kill -0 `$(cat $PidFile) 2>/dev/null; then",
+        "echo 'Stopping existing FastAPI PID' `$(cat $PidFile);",
+        "kill `$(cat $PidFile) 2>/dev/null || true;",
+        "for i in 1 2 3 4 5; do",
+        "if ! kill -0 `$(cat $PidFile) 2>/dev/null; then break; fi;",
+        "sleep 1;",
+        "done;",
+        "rm -f $PidFile;",
+        "fi;",
         "if [ -f $PidFile ] && ! kill -0 `$(cat $PidFile) 2>/dev/null; then",
         "rm -f $PidFile;",
         "fi;",
@@ -158,18 +203,16 @@ if ($Config.app.background -eq $true) {
         "echo `$! > $PidFile;",
         "echo 'FastAPI started with PID' `$(cat $PidFile);",
         "fi;",
-        "ready=0;",
         "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do",
-        "if $HealthCheck >/dev/null 2>&1; then ready=1; break; fi;",
+        "if $HealthCheck >/dev/null 2>&1; then",
+        "echo 'FastAPI is listening on port $($Config.app.port).';",
+        "exit 0;",
+        "fi;",
         "sleep 1;",
         "done;",
-        "if [ `$ready -eq 1 ]; then",
-        "echo 'FastAPI is listening on port $($Config.app.port).';",
-        "else",
         "echo 'FastAPI did not start. Recent log:';",
         "tail -80 $LogFile;",
-        "exit 1;",
-        "fi"
+        "exit 1"
     )
     $AppCommand = (($AppEnv + @("&&") + $StartWeb) -join " ")
 } else {
@@ -178,6 +221,29 @@ if ($Config.app.background -eq $true) {
 
 $ExitCode = Invoke-WslBash -User $Config.wsl.app_user -Command $AppCommand
 if ($ExitCode -eq 0 -and $Config.app.background -eq $true) {
-    Write-Host "Startup finished. FastAPI is running in WSL background."
+    Write-Host "FastAPI is running in WSL background."
+    Write-Host "Checking Windows localhost forwarding..."
+    if (Test-WindowsHttp -Port $Config.app.port) {
+        Write-Host "Windows can access http://localhost:$($Config.app.port)." -ForegroundColor Green
+    } else {
+        Write-Host ""
+        Write-Host "FastAPI is reachable inside WSL, but Windows localhost:$($Config.app.port) is not reachable." -ForegroundColor Yellow
+        Write-Host "This is usually a WSL NAT localhost forwarding issue, not a FastAPI failure."
+        $WslConfigWarning = Get-WslConfigWarning
+        if ($WslConfigWarning) {
+            Write-Host ""
+            Write-Host $WslConfigWarning -ForegroundColor Yellow
+        }
+        Write-Host "Try these commands in Windows, then run this script again:"
+        Write-Host "  wsl --shutdown"
+        Write-Host "  wsl -d $($Config.wsl.distro)"
+        Write-Host ""
+        Write-Host "You can also verify inside WSL:"
+        Write-Host "  curl -I http://127.0.0.1:$($Config.app.port)/"
+        Write-Host ""
+        Write-Host "Recent FastAPI log:"
+        Invoke-WslBash -User $Config.wsl.app_user -Command "tail -40 $LogFile" | Out-Null
+        exit 2
+    }
 }
 exit $ExitCode

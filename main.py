@@ -8,6 +8,7 @@ import secrets
 import subprocess
 import time
 import tracemalloc
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -39,7 +40,9 @@ DEFAULT_ADMIN_PASSWORD_HASH = (
 )
 MEMBER_PERFORMANCE_INDEXES = [
     ("idx_members_clan", "CREATE INDEX idx_members_clan ON members(clan_id)"),
+    ("idx_members_name", "CREATE INDEX idx_members_name ON members(name)"),
     ("idx_members_clan_name", "CREATE INDEX idx_members_clan_name ON members(clan_id, name)"),
+    ("idx_members_clan_order", "CREATE INDEX idx_members_clan_order ON members(clan_id, generation_num, member_id)"),
     ("idx_members_father", "CREATE INDEX idx_members_father ON members(father_id)"),
     ("idx_members_mother", "CREATE INDEX idx_members_mother ON members(mother_id)"),
 ]
@@ -1314,12 +1317,14 @@ class TotemGenealogyService(DemoGenealogyService):
             return rows[0]
         except HTTPException:
             raise
-        except Exception:
-            return super().update_member(member_id, payload)
+        except Exception as exc:
+            log_exception("error", exc, "update_member member_id={}".format(member_id))
+            raise HTTPException(status_code=500, detail="更新成员失败：Totem 数据库执行异常，请查看 errorlog，成员 ID={}".format(member_id))
 
     def update_member_photo_hash(self, member_id: int, photo_hash: str, content: bytes = b"", content_type: str = "image/jpeg") -> Dict[str, Any]:
         try:
             self._ensure_photo_table()
+            self._member_row(member_id, role="照片所属成员")
             if content:
                 encoded = base64.b64encode(content).decode("ascii")
                 exists = self.client.query(
@@ -1349,12 +1354,13 @@ class TotemGenealogyService(DemoGenealogyService):
                 f"FROM members WHERE member_id = {sql_literal(member_id)};"
             )
             if not rows:
-                raise HTTPException(status_code=404, detail="未找到成员")
+                raise HTTPException(status_code=404, detail="未找到照片所属成员：ID {}".format(member_id))
             return rows[0]
         except HTTPException:
             raise
-        except Exception:
-            return super().update_member_photo_hash(member_id, photo_hash, content, content_type)
+        except Exception as exc:
+            log_exception("error", exc, "update_member_photo_hash member_id={}".format(member_id))
+            raise HTTPException(status_code=500, detail="更新照片失败：Totem 数据库执行异常，请查看 errorlog，成员 ID={}".format(member_id))
 
     def member_photo(self, member_id: int) -> Optional[Tuple[bytes, str]]:
         try:
@@ -1574,13 +1580,13 @@ class TotemGenealogyService(DemoGenealogyService):
             return None
         return int(value)
 
-    def _member_row(self, member_id: int) -> Dict[str, Any]:
+    def _member_row(self, member_id: int, role: str = "成员") -> Dict[str, Any]:
         rows = self.client.query(
             "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
             f"FROM members WHERE member_id = {sql_literal(member_id)} LIMIT 1;"
         )
         if not rows:
-            raise HTTPException(status_code=404, detail="未找到成员")
+            raise HTTPException(status_code=404, detail="未找到{}：ID {}".format(role, member_id))
         return rows[0]
 
     def _ensure_photo_table(self) -> None:
@@ -1626,7 +1632,7 @@ class TotemGenealogyService(DemoGenealogyService):
                 continue
             if member_id and int(parent_id) == int(member_id):
                 raise HTTPException(status_code=400, detail="不能把自己设为{}".format(role))
-            parent = self._member_row(int(parent_id))
+            parent = self._member_row(int(parent_id), role=role)
             if self._optional_int(parent.get("clan_id")) != int(clan_id):
                 raise HTTPException(status_code=400, detail="{}必须属于同一族谱".format(role))
             if parent.get("gender") != required_gender:
@@ -1691,7 +1697,7 @@ class TotemGenealogyService(DemoGenealogyService):
             f"WHERE member_id = {sql_literal(member_id)} LIMIT 1;"
         )
         if not rows:
-            raise HTTPException(status_code=404, detail="未找到成员")
+            raise HTTPException(status_code=404, detail="未找到要编辑的成员：ID {}".format(member_id))
         return rows[0]
 
     def _parent_pair_from_row(self, row: Dict[str, Any]) -> Optional[Tuple[int, int]]:
@@ -1819,8 +1825,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    log_exception("crash", exc, "{} {}".format(request.method, request.url.path))
-    return JSONResponse(status_code=500, content={"detail": "服务器内部错误"})
+    error_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
+    log_exception("crash", exc, "{} {} error_id={}".format(request.method, request.url.path, error_id))
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "服务器内部错误，请查看 log/errorlog.txt，错误编号：{}".format(error_id), "error_id": error_id},
+    )
 
 
 def load_script_module(filename: str, module_name: str):
@@ -2005,6 +2015,66 @@ def configure_member_indexes(performance_mode: bool) -> Dict[str, Any]:
     return result
 
 
+def member_search_sql(clan_id: int, q: str, performance_mode: bool) -> str:
+    keyword = q.strip()
+    select_sql = (
+        "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+        "FROM members"
+    )
+    scope = []
+    if clan_id:
+        scope.append("clan_id = {}".format(sql_literal(clan_id)))
+
+    if performance_mode:
+        conditions = []
+        if keyword.isdigit():
+            conditions.append("member_id = {}".format(sql_literal(int(keyword))))
+        upper = prefix_upper_bound(keyword)
+        if upper:
+            conditions.append("(name >= {} AND name < {})".format(sql_literal(keyword), sql_literal(upper)))
+        else:
+            conditions.append("name = {}".format(sql_literal(keyword)))
+        where_parts = scope + ["(" + " OR ".join(conditions) + ")"]
+    else:
+        conditions = [
+            "name LIKE {}".format(sql_literal("%" + keyword + "%")),
+            "CAST(member_id AS TEXT) LIKE {}".format(sql_literal("%" + keyword + "%")),
+        ]
+        where_parts = scope + ["(" + " OR ".join(conditions) + ")"]
+
+    where_sql = " WHERE " + " AND ".join(where_parts) if where_parts else ""
+    order_sql = " LIMIT 200" if performance_mode else " ORDER BY clan_id,generation_num,member_id LIMIT 200"
+    return select_sql + where_sql + order_sql
+
+
+def prefix_upper_bound(value: str) -> str:
+    if not value:
+        return ""
+    codepoints = [ord(ch) for ch in value]
+    codepoints[-1] += 1
+    return "".join(chr(item) for item in codepoints)
+
+
+def indexed_member_search(clan_id: int, q: str, performance_mode: bool) -> List[Dict[str, Any]]:
+    if hasattr(service, "client"):
+        return service.client.query(member_search_sql(clan_id, q, performance_mode) + ";")  # type: ignore[attr-defined]
+    keyword = q.strip().lower()
+    rows = all_member_rows(clan_id or None)
+    if performance_mode:
+        matched = []
+        for row in rows:
+            name = str(row.get("name", ""))
+            member_id = str(row.get("member_id", ""))
+            if member_id == q.strip() or name == q.strip() or name.startswith(q.strip()):
+                matched.append(row)
+        return matched[:200]
+    return [
+        row for row in rows
+        if keyword in str(row.get("name", "")).lower()
+        or keyword in str(row.get("member_id", ""))
+    ][:200]
+
+
 def measured_member_search(clan_id: int, q: str, performance_mode: bool) -> Dict[str, Any]:
     keyword = q.strip().lower()
     if not keyword:
@@ -2029,16 +2099,7 @@ def measured_member_search(clan_id: int, q: str, performance_mode: bool) -> Dict
     tracemalloc.start()
     started = time.perf_counter()
     try:
-        if clan_id:
-            rows = service.members(clan_id, q)
-        else:
-            rows = all_member_rows()
-            rows = [
-                row for row in rows
-                if keyword in str(row.get("name", "")).lower()
-                or keyword in str(row.get("member_id", ""))
-            ]
-            rows = rows[:200]
+        rows = indexed_member_search(clan_id, q, performance_mode)
         elapsed_ms = (time.perf_counter() - started) * 1000
         _, peak = tracemalloc.get_traced_memory()
         return {
@@ -2093,17 +2154,7 @@ def write_search_explain(q: str, clan_id: int = 0, performance_mode: bool = Fals
     if not keyword:
         raise HTTPException(status_code=400, detail="请输入搜索关键词")
     index_status = configure_member_indexes(performance_mode)
-    conditions = []
-    if clan_id:
-        conditions.append("clan_id = {}".format(sql_literal(clan_id)))
-    conditions.append("(name LIKE {} OR CAST(member_id AS TEXT) LIKE {})".format(
-        sql_literal("%" + keyword + "%"),
-        sql_literal("%" + keyword + "%"),
-    ))
-    sql = (
-        "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
-        "FROM members WHERE {} ORDER BY clan_id,generation_num,member_id LIMIT 200".format(" AND ".join(conditions))
-    )
+    sql = member_search_sql(clan_id, keyword, performance_mode)
     explain_sql = "EXPLAIN ANALYZE " + sql + ";"
     output = run_tsql_text(["-c", explain_sql], timeout=180)
     target_dir = ensure_output_dir("performance-test")
@@ -2140,7 +2191,9 @@ def index() -> HTMLResponse:
 @app.post("/api/login")
 def login(payload: LoginRequest) -> Dict[str, Any]:
     result = service.authenticate(payload.user_id, payload.password)
-    result["log_session"] = start_user_log(payload.user_id)
+    session = start_user_log(payload.user_id)
+    result["log_session"] = session
+    record_action(payload.user_id, session, "log-in", payload.user_id)
     return result
 
 
@@ -2362,6 +2415,11 @@ def revoke_collaboration(payload: CollaborationIn, current_user_id: Optional[str
     result = service.revoke_collaboration(payload)
     record_action(actor, log_session, "remove-access", "{}:{}".format(payload.clan_id, payload.user_id))
     return result
+
+
+@app.post("/api/collaborations/revoke")
+def revoke_collaboration_post(payload: CollaborationIn, current_user_id: Optional[str] = None, log_session: Optional[str] = None) -> Dict[str, Any]:
+    return revoke_collaboration(payload, current_user_id=current_user_id, log_session=log_session)
 
 
 @app.get("/api/dashboard")

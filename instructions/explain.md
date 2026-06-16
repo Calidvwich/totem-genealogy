@@ -401,3 +401,50 @@ CREATE INDEX idx_members_clan_birth ON members(clan_id, birth_year);
 - 查询耗时是否下降。
 - 小族谱搜索是否比全库搜索更明显受益。
 - 父母/子女、四代后代查询在大族谱中是否稳定。
+---
+
+## 当前性能模式搜索策略补充
+
+当前成员搜索的性能模式已经调整为“SQL 侧索引前缀搜索”，不再把全表成员拉回 Python 后过滤。
+
+普通模式用于实验对照：
+
+```sql
+WHERE name LIKE '%关键字%'
+   OR CAST(member_id AS TEXT) LIKE '%关键字%'
+ORDER BY clan_id, generation_num, member_id
+LIMIT 200;
+```
+
+这种方式支持包含式模糊搜索，但前置 `%` 通配符通常不能有效利用 B-Tree 索引，因此会接近全表扫描。
+
+性能模式用于加速常见检索：
+
+```sql
+WHERE member_id = 14378
+   OR (name >= '张_1_1' AND name < '张_1_2')
+LIMIT 200;
+```
+
+其中姓名前缀查询不再使用 `LIKE '前缀%'`，而是改成 B-Tree 友好的范围查询。比如：
+
+- `张` 会被转换为 `name >= '张' AND name < '弡'`
+- `张_1_1` 会被转换为 `name >= '张_1_1' AND name < '张_1_2'`
+- `14378` 会额外使用 `member_id = 14378`
+
+性能模式配套索引：
+
+```sql
+CREATE INDEX idx_members_name ON members(name);
+CREATE INDEX idx_members_clan_name ON members(clan_id, name);
+CREATE INDEX idx_members_clan_order ON members(clan_id, generation_num, member_id);
+CREATE INDEX idx_members_father ON members(father_id);
+CREATE INDEX idx_members_mother ON members(mother_id);
+```
+
+这样设计后：
+
+- 精确成员 ID 查询会走主键/ID 条件。
+- `张_1_1` 这类具体姓名或前缀查询能明显利用 `name` 或 `(clan_id, name)` 索引。
+- `张` 这类低选择性查询仍会返回大量候选，但性能模式会避免全表 Python 过滤和额外排序，因此会明显快于普通模式。
+- 如果需要真正支持任意包含式搜索，例如只输入中间片段 `1_1`，B-Tree 不是最合适的结构，通常需要全文索引、倒排索引或 trigram 类索引；当前 TotemDB 实验环境优先采用 B-Tree 范围查询作为可解释、可演示的方案。

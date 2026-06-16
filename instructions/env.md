@@ -309,14 +309,35 @@ could not bind IPv4 socket: Address already in use
 
 ### 12.3 `localhost:8000` 拒绝连接
 
-检查 Uvicorn：
+先检查 WSL 内部 Uvicorn 是否真的在运行：
 
 ```bash
 ps -ef | grep "[u]vicorn main:app"
 tail -80 /tmp/totem-genealogy-uvicorn.log
+curl -I http://127.0.0.1:8000/
 ```
 
-如果没有进程，重新双击 `start-genealogy.bat` 或手动启动 Web。
+如果 WSL 内部 `curl` 返回 `200 OK`，但 Windows 浏览器访问 `http://localhost:8000` 被拒绝，说明问题通常不是 FastAPI，而是 WSL NAT 的 localhost 转发没有建立。可以在 Windows 中执行：
+
+```powershell
+wsl --shutdown
+wsl -d Ubuntu-18.04
+```
+
+然后重新双击 `start-genealogy.bat`。
+
+当前启动脚本会做两层检查：
+
+1. WSL 内部 `http://127.0.0.1:8000/` 是否可访问。
+2. Windows 侧 `http://127.0.0.1:8000/` 是否可访问。
+
+如果第一步成功但第二步失败，脚本会明确提示这是 WSL localhost 转发问题，并给出 `wsl --shutdown` 的恢复建议。
+
+另外，启动脚本默认会重启 pid 文件记录的旧 Uvicorn 进程，避免浏览器继续访问旧代码。如果确实想保留旧进程，可以手动执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-genealogy.ps1 -NoRestart
+```
 
 ### 12.4 `\COPY` 语法报错
 

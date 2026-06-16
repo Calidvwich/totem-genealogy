@@ -1,50 +1,36 @@
 # 完整数据库导出与恢复说明
 
-本文件夹是当前 `genealogy` 数据库的完整导出，导出时间见 `manifest.json`。
+本文件夹保存了一份完整数据库导出。恢复时不需要迁移 SQL：先用当前项目的 `init_db.sql` 建立最新表结构，再用 `import_bundle.json` 恢复业务数据，导入脚本会自动重建对象-代理层。
 
 ## 文件内容
 
-- `import_bundle.json`：完整可恢复导入包，推荐使用这个文件直接导入。
-- `manifest.json`：导出元信息，记录导出类型、数据库名、导出时间和包含的文件。
-- `users.csv`：用户表。
-- `genealogies.csv`：族谱表。
-- `collaborations.csv`：协作权限表。
-- `members.csv`：成员表。
-- `marriages.csv`：婚姻关系表。
-- `member_photos.csv`：成员照片表，照片内容以 sha256 和 base64 形式存储。
+- `import_bundle.json`：可直接导入的完整恢复包。
+- `manifest.json`：导出元信息。
+- `users.csv`：用户数据。
+- `genealogies.csv`：族谱数据。
+- `collaborations.csv`：协作权限数据。
+- `members.csv`：成员数据。
+- `marriages.csv`：婚姻关系数据。
+- `member_photos.csv`：成员照片数据，照片内容以 sha256 和 base64 形式存储。
 
-当前导出规模：
+## 恢复流程
 
-- 用户：3
-- 族谱：11
-- 协作权限：12
-- 成员：105004
-- 婚姻关系：16183
-- 成员照片：0
-
-## 直接恢复到数据库
-
-先启动 TotemDB，并确认 `genealogy` 数据库存在：
+先启动 TotemDB，并确认 `genealogy` 数据库可连接：
 
 ```bash
 /usr/local/totem/bin/totemctl -D /usr/local/totem/data -o "-p 55432" -l /tmp/totem-55432.log start
 /usr/local/totem/bin/tsql -U totem -p 55432 -d genealogy -c "SELECT 1;"
 ```
 
-进入项目目录：
+进入项目目录并初始化最新表结构：
 
 ```bash
 cd /mnt/e/totemdb/project
 . .venv/bin/activate
-```
-
-如果是空数据库，先初始化表结构：
-
-```bash
 /usr/local/totem/bin/tsql -U totem -p 55432 -d genealogy -f init_db.sql
 ```
 
-然后执行完整恢复：
+然后恢复完整导出：
 
 ```bash
 export TOTEM_DATABASE=genealogy
@@ -53,34 +39,20 @@ export TOTEM_PORT=55432
 python import.py restore fulldb/import_bundle.json --reset
 ```
 
-`--reset` 会先清空以下表，再导入本导出包：
+`--reset` 会清空当前库中的用户、族谱、成员、婚姻、协作权限、照片以及对象代理数据，再恢复导出包内容。恢复完成后，`import.py` 会根据恢复后的业务表自动生成：
 
-- `users`
-- `genealogies`
-- `collaborations`
-- `members`
-- `marriages`
-- `member_photos`
+- `objects`
+- `object_proxies`
+- 各业务表中的 `object_id`
 
-因此它适合完整替换数据库内容。如果不希望覆盖当前数据库，可以去掉 `--reset`：
+因此旧导出包可以直接用于当前对象-代理风格的新表结构。
 
-```bash
-python import.py restore fulldb/import_bundle.json
-```
-
-不带 `--reset` 时，如果数据库中已经存在相同用户、族谱 ID、成员 ID、婚姻 ID、照片 sha256 或协作关系，导入会停止并输出重复原因。
-
-## 恢复后验证
+## 恢复验证
 
 ```bash
 /usr/local/totem/bin/tsql -U totem -p 55432 -d genealogy -c "SELECT COUNT(*) FROM members;"
-/usr/local/totem/bin/tsql -U totem -p 55432 -d genealogy -c "SELECT COUNT(*) FROM marriages;"
-```
-
-也可以启动 Web 系统后访问：
-
-```text
-http://localhost:8000
+/usr/local/totem/bin/tsql -U totem -p 55432 -d genealogy -c "SELECT object_type, COUNT(*) FROM objects GROUP BY object_type ORDER BY object_type;"
+/usr/local/totem/bin/tsql -U totem -p 55432 -d genealogy -c "SELECT proxy_table, COUNT(*) FROM object_proxies GROUP BY proxy_table ORDER BY proxy_table;"
 ```
 
 默认测试账号：

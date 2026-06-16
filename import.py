@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -52,7 +53,23 @@ def run_tsql(args, timeout=120):
         timeout=timeout,
     )
     if completed.returncode != 0:
-        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
+        output = (completed.stderr.strip() or completed.stdout.strip() or "no output")
+        sql_hint = ""
+        if "-c" in args:
+            try:
+                sql_hint = " sql={}".format(args[args.index("-c") + 1][:300])
+            except Exception:
+                sql_hint = ""
+        raise RuntimeError(
+            "Totem SQL failed database={} user={} port={} command={}{} message={}".format(
+                DATABASE,
+                TOTEM_USER or "(default)",
+                TOTEM_PORT or "(default)",
+                " ".join(command),
+                sql_hint,
+                output,
+            )
+        )
     return completed.stdout
 
 
@@ -67,6 +84,22 @@ def query_scalar(sql, default=0):
 
 def execute(sql, timeout=120):
     run_tsql(["-c", sql], timeout=timeout)
+
+
+def try_execute(sql, timeout=120):
+    try:
+        execute(sql, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def table_available(table):
+    try:
+        run_tsql(["-c", "SELECT 1 FROM {} LIMIT 1;".format(table)], timeout=30)
+        return True
+    except Exception:
+        return False
 
 
 def copy_from(table, columns, path, timeout=300):
@@ -87,6 +120,13 @@ TABLE_COLUMNS = {
     "member_photos": ["photo_sha256", "content_type", "content_base64", "created_at", "updated_at"],
 }
 RESTORE_ORDER = ["users", "genealogies", "collaborations", "members", "marriages", "member_photos"]
+
+OBJECT_OFFSETS = {
+    "user": 0,
+    "genealogy": 100000000000,
+    "member": 200000000000,
+    "marriage": 300000000000,
+}
 
 
 def normalize_db_value(value):
@@ -116,7 +156,7 @@ def load_import_bundle(bundle_path):
     return data
 
 
-def validate_bundle_duplicates(bundle):
+def validate_bundle_duplicates(bundle, check_database=True):
     tables = bundle.get("tables", {})
     duplicate_messages = []
     seen = {}
@@ -149,28 +189,29 @@ def validate_bundle_duplicates(bundle):
             duplicate_messages.append("users 导入文件内部账号重复：{}".format(user_id))
         user_ids.add(user_id)
 
-    for user_id in sorted(user_ids):
-        if count_where("users", "user_id = {}".format(sql_literal(user_id))):
-            duplicate_messages.append("数据库中已存在账号 user_id={}".format(user_id))
+    if check_database:
+        for user_id in sorted(user_ids):
+            if count_where("users", "user_id = {}".format(sql_literal(user_id))):
+                duplicate_messages.append("数据库中已存在账号 user_id={}".format(user_id))
 
-    for key in sorted(seen.get("users", [])):
-        if count_where("users", "id = {}".format(sql_literal(key[0]))):
-            duplicate_messages.append("数据库中已存在 users.id={}".format(key[0]))
-    for key in sorted(seen.get("genealogies", [])):
-        if count_where("genealogies", "clan_id = {}".format(sql_literal(key[0]))):
-            duplicate_messages.append("数据库中已存在 genealogies.clan_id={}".format(key[0]))
-    for key in sorted(seen.get("members", [])):
-        if count_where("members", "member_id = {}".format(sql_literal(key[0]))):
-            duplicate_messages.append("数据库中已存在 members.member_id={}".format(key[0]))
-    for key in sorted(seen.get("marriages", [])):
-        if count_where("marriages", "marriage_id = {}".format(sql_literal(key[0]))):
-            duplicate_messages.append("数据库中已存在 marriages.marriage_id={}".format(key[0]))
-    for key in sorted(seen.get("member_photos", [])):
-        if count_where("member_photos", "photo_sha256 = {}".format(sql_literal(key[0]))):
-            duplicate_messages.append("数据库中已存在 member_photos.photo_sha256={}".format(key[0]))
-    for key in sorted(seen.get("collaborations", [])):
-        if count_where("collaborations", "clan_id = {} AND user_id = {}".format(sql_literal(key[0]), sql_literal(key[1]))):
-            duplicate_messages.append("数据库中已存在 collaborations(clan_id={}, user_id={})".format(key[0], key[1]))
+        for key in sorted(seen.get("users", [])):
+            if count_where("users", "id = {}".format(sql_literal(key[0]))):
+                duplicate_messages.append("数据库中已存在 users.id={}".format(key[0]))
+        for key in sorted(seen.get("genealogies", [])):
+            if count_where("genealogies", "clan_id = {}".format(sql_literal(key[0]))):
+                duplicate_messages.append("数据库中已存在 genealogies.clan_id={}".format(key[0]))
+        for key in sorted(seen.get("members", [])):
+            if count_where("members", "member_id = {}".format(sql_literal(key[0]))):
+                duplicate_messages.append("数据库中已存在 members.member_id={}".format(key[0]))
+        for key in sorted(seen.get("marriages", [])):
+            if count_where("marriages", "marriage_id = {}".format(sql_literal(key[0]))):
+                duplicate_messages.append("数据库中已存在 marriages.marriage_id={}".format(key[0]))
+        for key in sorted(seen.get("member_photos", [])):
+            if count_where("member_photos", "photo_sha256 = {}".format(sql_literal(key[0]))):
+                duplicate_messages.append("数据库中已存在 member_photos.photo_sha256={}".format(key[0]))
+        for key in sorted(seen.get("collaborations", [])):
+            if count_where("collaborations", "clan_id = {} AND user_id = {}".format(sql_literal(key[0]), sql_literal(key[1]))):
+                duplicate_messages.append("数据库中已存在 collaborations(clan_id={}, user_id={})".format(key[0], key[1]))
 
     if duplicate_messages:
         raise ValueError("导入停止，发现重复或无效数据：\n- " + "\n- ".join(duplicate_messages[:50]))
@@ -180,15 +221,38 @@ def insert_rows(table, rows):
     if not rows:
         return 0
     columns = TABLE_COLUMNS[table]
-    for row in rows:
-        values = [sql_literal(row_value(row, column)) for column in columns]
-        execute(
-            "INSERT INTO {}({}) VALUES ({});".format(
-                table,
-                ",".join(columns),
-                ",".join(values),
+    if len(rows) >= 100:
+        temp_path = None
+        try:
+            handle = tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                suffix="_{}_restore.csv".format(table),
+                delete=False,
             )
-        )
+            temp_path = Path(handle.name)
+            with handle:
+                writer = csv.writer(handle)
+                for row in rows:
+                    writer.writerow(["" if row_value(row, column) is None else row_value(row, column) for column in columns])
+            copy_from(table, columns, temp_path, timeout=900)
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+    else:
+        for row in rows:
+            values = [sql_literal(row_value(row, column)) for column in columns]
+            execute(
+                "INSERT INTO {}({}) VALUES ({});".format(
+                    table,
+                    ",".join(columns),
+                    ",".join(values),
+                )
+            )
     return len(rows)
 
 
@@ -196,17 +260,19 @@ def import_bundle(bundle_path, reset=False):
     bundle = load_import_bundle(bundle_path)
     if reset:
         reset_all_data()
-    validate_bundle_duplicates(bundle)
+    validate_bundle_duplicates(bundle, check_database=not reset)
     tables = bundle["tables"]
     inserted = {}
     for table in RESTORE_ORDER:
         inserted[table] = insert_rows(table, tables.get(table, []))
+    object_layer = rebuild_object_proxies()
     return {
         "ok": True,
         "mode": "restore",
         "bundle": str(bundle_path),
         "manifest": bundle.get("manifest", {}),
         "inserted": inserted,
+        "object_layer": object_layer,
     }
 
 
@@ -219,6 +285,8 @@ def ensure_generated_files(total=None):
 
 
 def reset_genealogy_data():
+    try_execute("DELETE FROM object_proxies WHERE proxy_table IN ('genealogies','members','marriages');")
+    try_execute("DELETE FROM objects WHERE object_type IN ('genealogy','member','marriage');")
     execute("DELETE FROM marriages;")
     execute("DELETE FROM members;")
     execute("DELETE FROM collaborations;")
@@ -226,12 +294,87 @@ def reset_genealogy_data():
 
 
 def reset_all_data():
+    try_execute("DELETE FROM object_proxies;")
+    try_execute("DELETE FROM objects;")
     execute("DELETE FROM marriages;")
     execute("DELETE FROM members;")
     execute("DELETE FROM collaborations;")
     execute("DELETE FROM genealogies;")
     execute("DELETE FROM member_photos;")
     execute("DELETE FROM users;")
+
+
+def rebuild_object_proxies():
+    if not table_available("objects") or not table_available("object_proxies"):
+        return {"ok": False, "skipped": True, "reason": "object tables are not available"}
+
+    execute("DELETE FROM object_proxies;", timeout=300)
+    execute("DELETE FROM objects;", timeout=300)
+
+    user_offset = OBJECT_OFFSETS["user"]
+    genealogy_offset = OBJECT_OFFSETS["genealogy"]
+    member_offset = OBJECT_OFFSETS["member"]
+    marriage_offset = OBJECT_OFFSETS["marriage"]
+
+    execute(
+        "INSERT INTO objects(object_id,object_type,display_name) "
+        "SELECT {offset} + id, 'user', user_id FROM users;".format(offset=user_offset),
+        timeout=300,
+    )
+    execute(
+        "INSERT INTO object_proxies(proxy_id,object_id,proxy_table,proxy_pk,proxy_label) "
+        "SELECT {offset} + id, {offset} + id, 'users', id, user_id FROM users;".format(offset=user_offset),
+        timeout=300,
+    )
+    try_execute("UPDATE users SET object_id = {} + id;".format(user_offset), timeout=300)
+
+    execute(
+        "INSERT INTO objects(object_id,object_type,display_name) "
+        "SELECT {offset} + clan_id, 'genealogy', title FROM genealogies;".format(offset=genealogy_offset),
+        timeout=300,
+    )
+    execute(
+        "INSERT INTO object_proxies(proxy_id,object_id,proxy_table,proxy_pk,proxy_label) "
+        "SELECT {offset} + clan_id, {offset} + clan_id, 'genealogies', clan_id, title FROM genealogies;".format(
+            offset=genealogy_offset
+        ),
+        timeout=300,
+    )
+    try_execute("UPDATE genealogies SET object_id = {} + clan_id;".format(genealogy_offset), timeout=300)
+
+    execute(
+        "INSERT INTO objects(object_id,object_type,display_name) "
+        "SELECT {offset} + member_id, 'member', name FROM members;".format(offset=member_offset),
+        timeout=600,
+    )
+    execute(
+        "INSERT INTO object_proxies(proxy_id,object_id,proxy_table,proxy_pk,proxy_label) "
+        "SELECT {offset} + member_id, {offset} + member_id, 'members', member_id, name FROM members;".format(
+            offset=member_offset
+        ),
+        timeout=600,
+    )
+    try_execute("UPDATE members SET object_id = {} + member_id;".format(member_offset), timeout=600)
+
+    execute(
+        "INSERT INTO objects(object_id,object_type,display_name) "
+        "SELECT {offset} + marriage_id, 'marriage', "
+        "CAST(spouse_a_id AS VARCHAR) || '-' || CAST(spouse_b_id AS VARCHAR) FROM marriages;".format(
+            offset=marriage_offset
+        ),
+        timeout=300,
+    )
+    execute(
+        "INSERT INTO object_proxies(proxy_id,object_id,proxy_table,proxy_pk,proxy_label) "
+        "SELECT {offset} + marriage_id, {offset} + marriage_id, 'marriages', marriage_id, "
+        "CAST(spouse_a_id AS VARCHAR) || '-' || CAST(spouse_b_id AS VARCHAR) FROM marriages;".format(
+            offset=marriage_offset
+        ),
+        timeout=300,
+    )
+    try_execute("UPDATE marriages SET object_id = {} + marriage_id;".format(marriage_offset), timeout=300)
+
+    return {"ok": True, "skipped": False}
 
 
 def import_generated_data(total=None, reset=True, creator_user_id="admin"):
@@ -258,11 +401,13 @@ def import_generated_data(total=None, reset=True, creator_user_id="admin"):
         "SELECT clan_id, creator_id FROM genealogies "
         "WHERE creator_id IS NOT NULL;"
     )
+    object_layer = rebuild_object_proxies()
     return {
         "ok": True,
         "mode": "generated",
         "members_file": str(GENERATED_FILES["members"]),
         "marriages_file": str(GENERATED_FILES["marriages"]),
+        "object_layer": object_layer,
     }
 
 
@@ -368,6 +513,7 @@ def import_clan_csv(csv_path, title, surname="", creator_user_id="admin"):
         )
         next_marriage_id += 1
 
+    object_layer = rebuild_object_proxies()
     return {
         "ok": True,
         "mode": "csv",
@@ -375,6 +521,7 @@ def import_clan_csv(csv_path, title, surname="", creator_user_id="admin"):
         "members": len(prepared),
         "marriages": len(parent_pairs),
         "title": title,
+        "object_layer": object_layer,
     }
 
 

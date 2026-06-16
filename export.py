@@ -42,7 +42,23 @@ def run_tsql(args, timeout=300):
         timeout=timeout,
     )
     if completed.returncode != 0:
-        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
+        output = (completed.stderr.strip() or completed.stdout.strip() or "no output")
+        sql_hint = ""
+        if "-c" in args:
+            try:
+                sql_hint = " sql={}".format(args[args.index("-c") + 1][:300])
+            except Exception:
+                sql_hint = ""
+        raise RuntimeError(
+            "Totem SQL failed database={} user={} port={} command={}{} message={}".format(
+                DATABASE,
+                TOTEM_USER or "(default)",
+                TOTEM_PORT or "(default)",
+                " ".join(command),
+                sql_hint,
+                output,
+            )
+        )
     return completed.stdout
 
 
@@ -83,9 +99,13 @@ def read_csv_dict(path):
         return list(csv.DictReader(handle))
 
 
+BASE_EXPORT_TABLES = ("users", "genealogies", "collaborations", "members", "marriages", "member_photos")
+OBJECT_EXPORT_TABLES = ("objects", "object_proxies")
+
+
 def write_import_bundle(target, manifest):
     tables = {}
-    for table_name in ("users", "genealogies", "collaborations", "members", "marriages", "member_photos"):
+    for table_name in OBJECT_EXPORT_TABLES + BASE_EXPORT_TABLES:
         csv_path = target / (table_name + ".csv")
         if csv_path.exists():
             tables[table_name] = read_csv_dict(csv_path)
@@ -135,16 +155,24 @@ def timestamp():
 def export_database(output_dir=None):
     target = Path(output_dir) if output_dir else EXPORT_DIR / ("database_" + timestamp())
     target.mkdir(parents=True, exist_ok=True)
+    files = []
+    try:
+        copy_to("SELECT * FROM objects ORDER BY object_id", target / "objects.csv")
+        copy_to("SELECT * FROM object_proxies ORDER BY proxy_id", target / "object_proxies.csv")
+        files.extend(["objects.csv", "object_proxies.csv"])
+    except Exception:
+        pass
     copy_to("SELECT * FROM users ORDER BY id", target / "users.csv")
     copy_to("SELECT * FROM genealogies ORDER BY clan_id", target / "genealogies.csv")
     copy_to("SELECT * FROM collaborations ORDER BY clan_id,user_id", target / "collaborations.csv")
     copy_to("SELECT * FROM members ORDER BY clan_id,generation_num,member_id", target / "members.csv")
     copy_to("SELECT * FROM marriages ORDER BY clan_id,marriage_id", target / "marriages.csv")
+    files.extend(["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv"])
     try:
         copy_to("SELECT * FROM member_photos ORDER BY photo_sha256", target / "member_photos.csv")
-        files = ["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv", "member_photos.csv"]
+        files.append("member_photos.csv")
     except Exception:
-        files = ["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv"]
+        pass
     manifest = {
         "type": "database",
         "database": DATABASE,

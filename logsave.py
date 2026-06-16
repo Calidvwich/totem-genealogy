@@ -64,13 +64,12 @@ def log_exception(kind, exc, context=""):
 
 
 def start_user_log(username):
-    """Create one log file for the current user session and record log-in."""
+    """Create one log file for the current user session."""
     try:
         _ensure_dirs()
         filename = "{}_{}.txt".format(_safe_name(username), _stamp_text())
         path = USER_LOG_DIR / filename
         path.touch(exist_ok=False)
-        log_user_action(username, filename, "log-in", username)
         return filename
     except Exception:
         return ""

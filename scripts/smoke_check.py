@@ -1,6 +1,8 @@
-"""用途：执行只读 smoke 检查；默认只读文件，可选只读 API 和只读 SQL。"""
+"""Read-only smoke checks for the Totem genealogy project.
 
-from __future__ import annotations
+The script is intentionally Python 3.6 compatible because the WSL test
+environment currently uses Ubuntu 18.04.
+"""
 
 import argparse
 import os
@@ -8,7 +10,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, List, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
@@ -22,20 +23,16 @@ REQUIRED_FILES = [
     "main.py",
     "interface.py",
     "init_db.sql",
-    "queries.md",
+    "instructions/queries.md",
     "verify_dataset.sql",
     "generate_data.py",
     "load_db.py",
-    "docs/code_audit.md",
-    "docs/database_design_review.md",
-    "docs/api_route_map.md",
-    "docs/manual_test_plan.md",
-    "docs/references.md",
-    "scripts/schema_readonly_check.sql",
     "resources/defaultpic.jpg",
 ]
 
 EXPECTED_TABLES = [
+    "objects",
+    "object_proxies",
     "users",
     "genealogies",
     "collaborations",
@@ -52,6 +49,8 @@ EXPECTED_ROUTES = [
     '"/api/members"',
     '"/api/tree"',
     '"/api/query/spouse_children"',
+    '"/api/import/bundle"',
+    '"/api/export/database"',
 ]
 
 SAFE_GET_PATHS = [
@@ -68,7 +67,7 @@ FORBIDDEN_SQL = re.compile(
 )
 
 
-def strip_sql_comments(sql: str) -> str:
+def strip_sql_comments(sql):
     sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
     lines = []
     for line in sql.splitlines():
@@ -76,77 +75,77 @@ def strip_sql_comments(sql: str) -> str:
     return "\n".join(lines)
 
 
-def pass_item(message: str) -> Tuple[bool, str]:
+def pass_item(message):
     return True, "[PASS] " + message
 
 
-def fail_item(message: str) -> Tuple[bool, str]:
+def fail_item(message):
     return False, "[FAIL] " + message
 
 
-def check_required_files() -> List[Tuple[bool, str]]:
+def check_required_files():
     results = []
     for relative in REQUIRED_FILES:
         path = ROOT / relative
         if path.exists():
-            results.append(pass_item(f"存在 {relative}"))
+            results.append(pass_item("file exists: {}".format(relative)))
         else:
-            results.append(fail_item(f"缺少 {relative}"))
+            results.append(fail_item("missing file: {}".format(relative)))
     return results
 
 
-def check_readonly_sql() -> List[Tuple[bool, str]]:
+def check_readonly_sql():
     if not READONLY_SQL.exists():
-        return [fail_item("缺少 scripts/schema_readonly_check.sql")]
+        return [fail_item("missing scripts/schema_readonly_check.sql")]
 
     text = READONLY_SQL.read_text(encoding="utf-8")
     executable = strip_sql_comments(text)
     if FORBIDDEN_SQL.search(executable):
-        return [fail_item("schema_readonly_check.sql 出现非只读 SQL 关键字")]
+        return [fail_item("schema_readonly_check.sql contains non-read-only SQL")]
 
     statements = [part.strip() for part in executable.split(";") if part.strip()]
     if not statements:
-        return [fail_item("schema_readonly_check.sql 没有可执行查询")]
+        return [fail_item("schema_readonly_check.sql has no executable SELECT")]
 
     results = []
     for index, statement in enumerate(statements, start=1):
         if statement.upper().startswith("SELECT"):
-            results.append(pass_item(f"SQL 语句 {index} 以 SELECT 开头"))
+            results.append(pass_item("SQL statement {} starts with SELECT".format(index)))
         else:
-            results.append(fail_item(f"SQL 语句 {index} 不是 SELECT 开头"))
+            results.append(fail_item("SQL statement {} is not SELECT".format(index)))
     return results
 
 
-def check_schema_file() -> List[Tuple[bool, str]]:
+def check_schema_file():
     schema_path = ROOT / "init_db.sql"
     text = schema_path.read_text(encoding="utf-8")
     results = []
     for table in EXPECTED_TABLES:
-        marker = f"CREATE TABLE {table}"
+        marker = "CREATE TABLE {}".format(table)
         if marker in text:
-            results.append(pass_item(f"init_db.sql 定义 {table}"))
+            results.append(pass_item("init_db.sql defines {}".format(table)))
         else:
-            results.append(fail_item(f"init_db.sql 未找到 {table}"))
-    for marker in ["PRIMARY KEY", "UNIQUE NOT NULL", "CHECK"]:
+            results.append(fail_item("init_db.sql does not define {}".format(table)))
+    for marker in ("PRIMARY KEY", "UNIQUE NOT NULL", "CHECK"):
         if marker in text:
-            results.append(pass_item(f"init_db.sql 包含 {marker}"))
+            results.append(pass_item("init_db.sql contains {}".format(marker)))
         else:
-            results.append(fail_item(f"init_db.sql 缺少 {marker}"))
+            results.append(fail_item("init_db.sql lacks {}".format(marker)))
     return results
 
 
-def check_routes() -> List[Tuple[bool, str]]:
+def check_routes():
     main_text = (ROOT / "main.py").read_text(encoding="utf-8")
     results = []
     for route in EXPECTED_ROUTES:
         if route in main_text:
-            results.append(pass_item(f"main.py 包含路由 {route}"))
+            results.append(pass_item("main.py contains route {}".format(route)))
         else:
-            results.append(fail_item(f"main.py 缺少路由 {route}"))
+            results.append(fail_item("main.py lacks route {}".format(route)))
     return results
 
 
-def check_api(base_url: str, timeout: float) -> List[Tuple[bool, str]]:
+def check_api(base_url, timeout):
     results = []
     normalized = base_url.rstrip("/") + "/"
     for path in SAFE_GET_PATHS:
@@ -156,19 +155,19 @@ def check_api(base_url: str, timeout: float) -> List[Tuple[bool, str]]:
             with urlopen(request, timeout=timeout) as response:
                 status = response.getcode()
                 if 200 <= status < 300:
-                    results.append(pass_item(f"GET {path} -> {status}"))
+                    results.append(pass_item("GET {} -> {}".format(path, status)))
                 else:
-                    results.append(fail_item(f"GET {path} -> {status}"))
+                    results.append(fail_item("GET {} -> {}".format(path, status)))
         except HTTPError as exc:
-            results.append(fail_item(f"GET {path} -> HTTP {exc.code}"))
+            results.append(fail_item("GET {} -> HTTP {}".format(path, exc.code)))
         except URLError as exc:
-            results.append(fail_item(f"GET {path} 连接失败：{exc.reason}"))
+            results.append(fail_item("GET {} connection failed: {}".format(path, exc.reason)))
         except TimeoutError:
-            results.append(fail_item(f"GET {path} 超时"))
+            results.append(fail_item("GET {} timed out".format(path)))
     return results
 
 
-def run_readonly_sql(timeout: int) -> List[Tuple[bool, str]]:
+def run_readonly_sql(timeout):
     check_result = check_readonly_sql()
     if not all(ok for ok, _ in check_result):
         return check_result
@@ -196,41 +195,41 @@ def run_readonly_sql(timeout: int) -> List[Tuple[bool, str]]:
             timeout=timeout,
         )
     except FileNotFoundError:
-        return [fail_item(f"找不到 tsql：{tsql}")]
+        return [fail_item("tsql not found: {}".format(tsql))]
     except subprocess.TimeoutExpired:
-        return [fail_item("执行只读 SQL 超时")]
+        return [fail_item("read-only SQL timed out")]
 
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip().splitlines()
-        suffix = f"：{detail[0]}" if detail else ""
-        return [fail_item("只读 SQL 执行失败" + suffix)]
+        suffix = ": {}".format(detail[0]) if detail else ""
+        return [fail_item("read-only SQL failed" + suffix)]
 
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
-    return [pass_item(f"只读 SQL 执行成功，输出 {len(lines)} 行")]
+    return [pass_item("read-only SQL succeeded, output lines: {}".format(len(lines)))]
 
 
-def report(results: Iterable[Tuple[bool, str]]) -> int:
+def report(results):
     failed = 0
     for ok, message in results:
         print(message)
         if not ok:
             failed += 1
     if failed:
-        print(f"\n结果：{failed} 项失败")
+        print("\nResult: {} failed".format(failed))
         return 1
-    print("\n结果：全部通过")
+    print("\nResult: all passed")
     return 0
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Totem 族谱项目只读 smoke 检查")
-    parser.add_argument("--base-url", help="可选：对运行中的 Web 服务执行只读 GET 检查")
-    parser.add_argument("--api-timeout", type=float, default=5.0, help="API 请求超时时间，默认 5 秒")
-    parser.add_argument("--run-sql", action="store_true", help="可选：用 tsql 执行只读 SQL 检查")
-    parser.add_argument("--sql-timeout", type=int, default=60, help="只读 SQL 执行超时时间，默认 60 秒")
+def main():
+    parser = argparse.ArgumentParser(description="Totem genealogy smoke checks")
+    parser.add_argument("--base-url", help="Optional running web service base URL")
+    parser.add_argument("--api-timeout", type=float, default=5.0)
+    parser.add_argument("--run-sql", action="store_true")
+    parser.add_argument("--sql-timeout", type=int, default=60)
     args = parser.parse_args()
 
-    results: List[Tuple[bool, str]] = []
+    results = []
     results.extend(check_required_files())
     results.extend(check_readonly_sql())
     results.extend(check_schema_file())
@@ -238,7 +237,6 @@ def main() -> int:
 
     if args.base_url:
         results.extend(check_api(args.base_url, args.api_timeout))
-
     if args.run_sql:
         results.extend(run_readonly_sql(args.sql_timeout))
 

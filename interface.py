@@ -356,13 +356,19 @@ def render_app() -> str:
     async function api(url, options={}) {
       const headers = options.body instanceof FormData ? {} : {"Content-Type":"application/json"};
       const res = await fetch(url, {headers, ...options});
+      const text = await res.text();
       if (!res.ok) {
         let detail = "请求失败";
-        try { detail = (await res.json()).detail || detail; } catch(e) {}
+        try { detail = JSON.parse(text).detail || detail; } catch(e) { if (text) detail = text; }
         throw new Error(formatApiError(detail));
       }
       if (res.status === 204) return null;
-      return res.json();
+      if (!text.trim()) throw new Error(`服务器返回空响应：${url}`);
+      try {
+        return JSON.parse(text);
+      } catch(e) {
+        throw new Error(`服务器返回非 JSON 响应：${text.slice(0, 120)}`);
+      }
     }
 
     async function handleLogin() {
@@ -516,7 +522,8 @@ def render_app() -> str:
         const data = await api(`/api/members/search-performance?clan_id=0&q=${encodeURIComponent(q)}&performance_mode=${perf}&${actorParam()}`);
         const found = data.ok && Number(data.count || 0) > 0;
         msg.style.color = found ? "var(--success)" : "var(--danger)";
-        msg.textContent = `${found ? "搜索成功" : "搜索失败，未检索到对象"} | ${data.mode === "performance" ? "性能模式/索引启用" : "普通模式/索引关闭"} | 用时 ${data.elapsed_ms} ms | 内存 ${data.memory_kb} KB | 结果 ${data.count} 条${data.error ? " | " + data.error : ""}`;
+        const modeText = data.mode === "performance" ? "性能模式/索引前缀搜索" : "普通模式/全表包含扫描";
+        msg.textContent = `${found ? "搜索成功" : "搜索失败，未检索到对象"} | ${modeText} | 用时 ${data.elapsed_ms} ms | 内存 ${data.memory_kb} KB | 结果 ${data.count} 条${data.error ? " | " + data.error : ""}`;
         results.innerHTML = found
           ? (data.rows || []).map(m => renderMemberItem(m)).join("")
           : "<div class='notice' style='color:var(--danger)'>没有检索到对象</div>";
@@ -987,6 +994,7 @@ def render_app() -> str:
         $("member_child_id").value = "";
         $("member_generation").value = m.generation_num || "";
         $("member_bio").value = m.bio || "";
+        $("member_photo").value = "";
         $("memberMsg").textContent = "";
         openModal("memberModal");
       } catch(e) { alert(e.message); }
@@ -1056,7 +1064,8 @@ def render_app() -> str:
         const motherId = await resolveMemberByName(clanId, $("member_mother_name").value, $("member_mother_id").value, "母亲", "F");
         const payload = {clan_id:clanId, name:$("member_name").value, gender:$("member_gender").value, birth_year:num($("member_birth").value), death_year:num($("member_death").value), father_id:fatherId, mother_id:motherId, generation_num:num($("member_generation").value), bio:$("member_bio").value};
         const saved = await api(id ? `/api/members/${id}?${actorParam()}` : `/api/members?${actorParam()}`, {method:id ? "PUT" : "POST", body:JSON.stringify(payload)});
-        const memberId = saved.member_id || id;
+        const memberId = saved.member_id || (saved.member && saved.member.member_id) || id;
+        if (!memberId) throw new Error("保存后未返回成员 ID，无法继续更新照片或子女关系");
         await attachChildIfNeeded(memberId, payload.gender, clanId);
         if ($("member_photo").files.length) {
           const form = new FormData(); form.append("photo", $("member_photo").files[0]);
@@ -1084,14 +1093,24 @@ def render_app() -> str:
     }
     async function grantAccess() {
       const clanId = Number($("collab_clan_id_label").textContent);
+      const userId = $("grant_user_input").value.trim();
+      if (!userId) {
+        $("grantMsg").textContent = "请输入用户账号";
+        return;
+      }
       try {
-        await api(`/api/collaborations?${actorParam()}`, {method:"POST", body:JSON.stringify({clan_id:clanId, user_id:$("grant_user_input").value})});
+        await api(`/api/collaborations?${actorParam()}`, {method:"POST", body:JSON.stringify({clan_id:clanId, user_id:userId})});
         $("grant_user_input").value = ""; $("grantMsg").textContent = "授权成功"; await loadCollaborators(clanId); await loadClans();
       } catch(e) { $("grantMsg").textContent = e.message; }
     }
     async function revokeAccess(clanId, userId) {
-      await api(`/api/collaborations?${actorParam()}`, {method:"DELETE", body:JSON.stringify({clan_id:clanId, user_id:userId})});
-      await loadCollaborators(clanId); await loadClans();
+      try {
+        await api(`/api/collaborations/revoke?${actorParam()}`, {method:"POST", body:JSON.stringify({clan_id:clanId, user_id:userId})});
+        $("grantMsg").textContent = "撤销成功";
+        await loadCollaborators(clanId); await loadClans();
+      } catch(e) {
+        $("grantMsg").textContent = e.message;
+      }
     }
 
     function openImportModal() {
