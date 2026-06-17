@@ -1056,6 +1056,8 @@ class TotemGenealogyService(DemoGenealogyService):
                 self.client.execute(f"DELETE FROM marriages WHERE clan_id = {sql_literal(clan_id)};")
             self.client.execute(f"DELETE FROM collaborations WHERE clan_id = {sql_literal(clan_id)};")
             self.client.execute(f"DELETE FROM genealogies WHERE clan_id = {sql_literal(clan_id)};")
+            self._sync_all_member_objects()
+            self._sync_all_marriage_objects()
         except Exception:
             super().delete_clan(clan_id)
 
@@ -1264,6 +1266,8 @@ class TotemGenealogyService(DemoGenealogyService):
                 f"VALUES ({', '.join(sql_literal(value) for value in values)});"
             )
             self._ensure_parent_marriage(payload.clan_id, payload.father_id, payload.mother_id)
+            self._sync_member_object(member_id)
+            self._sync_all_marriage_objects()
             rows = self.client.query(
                 "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
                 f"FROM members WHERE member_id = {sql_literal(member_id)};"
@@ -1314,6 +1318,8 @@ class TotemGenealogyService(DemoGenealogyService):
                     self._optional_int(rows[0].get("father_id")),
                     self._optional_int(rows[0].get("mother_id")),
                 )
+                self._sync_all_marriage_objects()
+            self._sync_member_object(member_id)
             return rows[0]
         except HTTPException:
             raise
@@ -1385,6 +1391,8 @@ class TotemGenealogyService(DemoGenealogyService):
             self.client.execute(f"DELETE FROM members WHERE member_id = {sql_literal(member_id)};")
             for pair in pairs:
                 self._cleanup_parent_marriage(pair)
+            self._sync_all_member_objects()
+            self._sync_all_marriage_objects()
         except Exception:
             super().delete_member(member_id)
 
@@ -1524,6 +1532,7 @@ class TotemGenealogyService(DemoGenealogyService):
                     sql_literal(payload.divorce_year),
                 )
             )
+            self._sync_marriage_object(marriage_id)
             return {"ok": True, "marriage_id": marriage_id, "message": "婚姻登记成功"}
         except HTTPException:
             raise
@@ -1540,6 +1549,7 @@ class TotemGenealogyService(DemoGenealogyService):
                 f"UPDATE marriages SET divorce_year = {sql_literal(payload.divorce_year)} "
                 f"WHERE marriage_id = {sql_literal(marriage_id)};"
             )
+            self._sync_marriage_object(marriage_id)
             return {"ok": True, "message": "离婚信息已更新"}
         except HTTPException:
             raise
@@ -1550,6 +1560,7 @@ class TotemGenealogyService(DemoGenealogyService):
         try:
             self._marriage_row(marriage_id)
             self.client.execute(f"DELETE FROM marriages WHERE marriage_id = {sql_literal(marriage_id)};")
+            self._delete_marriage_object(marriage_id)
         except HTTPException:
             raise
         except Exception:
@@ -1573,6 +1584,56 @@ class TotemGenealogyService(DemoGenealogyService):
             raise
         except Exception:
             return super().invite(payload)
+
+    def _sync_member_object(self, member_id: int) -> None:
+        try:
+            self.client.execute(f"DELETE FROM member_objects WHERE member_id = {sql_literal(member_id)};")
+            self.client.execute(
+                "INSERT INTO member_objects(member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num) "
+                "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num "
+                f"FROM members WHERE member_id = {sql_literal(member_id)};"
+            )
+        except Exception as exc:
+            log_exception("error", exc, "sync_member_object member_id={}".format(member_id))
+
+    def _sync_marriage_object(self, marriage_id: int) -> None:
+        try:
+            self.client.execute(f"DELETE FROM marriage_objects WHERE marriage_id = {sql_literal(marriage_id)};")
+            self.client.execute(
+                "INSERT INTO marriage_objects(marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year) "
+                "SELECT marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year "
+                f"FROM marriages WHERE marriage_id = {sql_literal(marriage_id)};"
+            )
+        except Exception as exc:
+            log_exception("error", exc, "sync_marriage_object marriage_id={}".format(marriage_id))
+
+    def _delete_marriage_object(self, marriage_id: int) -> None:
+        try:
+            self.client.execute(f"DELETE FROM marriage_objects WHERE marriage_id = {sql_literal(marriage_id)};")
+        except Exception as exc:
+            log_exception("error", exc, "delete_marriage_object marriage_id={}".format(marriage_id))
+
+    def _sync_all_member_objects(self) -> None:
+        try:
+            self.client.execute("DELETE FROM member_objects;")
+            self.client.execute(
+                "INSERT INTO member_objects(member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num) "
+                "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num "
+                "FROM members;"
+            )
+        except Exception as exc:
+            log_exception("error", exc, "sync_all_member_objects")
+
+    def _sync_all_marriage_objects(self) -> None:
+        try:
+            self.client.execute("DELETE FROM marriage_objects;")
+            self.client.execute(
+                "INSERT INTO marriage_objects(marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year) "
+                "SELECT marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year "
+                "FROM marriages;"
+            )
+        except Exception as exc:
+            log_exception("error", exc, "sync_all_marriage_objects")
 
     @staticmethod
     def _optional_int(value: Any) -> Optional[int]:
@@ -1938,6 +1999,138 @@ def all_member_rows(clan_id: Optional[int] = None) -> List[Dict[str, Any]]:
             continue
         rows.append(public_member(member))
     return sorted(rows, key=lambda item: (int(item["clan_id"]), int(item.get("generation_num") or 999), int(item["member_id"])))
+
+
+def query_deputy_class(class_name: str, sql: str) -> Optional[List[Dict[str, Any]]]:
+    if not hasattr(service, "client"):
+        return None
+    try:
+        service.client.query("SELECT 1 FROM {} LIMIT 1;".format(class_name))  # type: ignore[attr-defined]
+        return service.client.query(sql)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+
+def deputy_member_details(member_ids: List[int]) -> Optional[List[Dict[str, Any]]]:
+    if not member_ids or not hasattr(service, "client"):
+        return [] if not member_ids else None
+    id_list = ",".join(str(int(item)) for item in sorted(set(member_ids)))
+    try:
+        rows = service.client.query(  # type: ignore[attr-defined]
+            "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+            "FROM members WHERE member_id IN ({}) ORDER BY member_id;".format(id_list)
+        )
+        by_id = {int(row["member_id"]): row for row in rows}
+        return [by_id[item] for item in member_ids if item in by_id]
+    except Exception:
+        return None
+
+
+def deputy_parent_edges(member_id: int) -> Optional[List[Dict[str, Any]]]:
+    father = query_deputy_class(
+        "father_up_edges",
+        "SELECT from_member_id,to_member_id,'father' AS parent_role FROM father_up_edges "
+        "WHERE from_member_id = {};".format(sql_literal(member_id)),
+    )
+    mother = query_deputy_class(
+        "mother_up_edges",
+        "SELECT from_member_id,to_member_id,'mother' AS parent_role FROM mother_up_edges "
+        "WHERE from_member_id = {};".format(sql_literal(member_id)),
+    )
+    if father is None or mother is None:
+        return None
+    return father + mother
+
+
+def deputy_child_edges(member_id: int) -> Optional[List[Dict[str, Any]]]:
+    father = query_deputy_class(
+        "father_down_edges",
+        "SELECT from_member_id,to_member_id,'father' AS parent_role FROM father_down_edges "
+        "WHERE from_member_id = {};".format(sql_literal(member_id)),
+    )
+    mother = query_deputy_class(
+        "mother_down_edges",
+        "SELECT from_member_id,to_member_id,'mother' AS parent_role FROM mother_down_edges "
+        "WHERE from_member_id = {};".format(sql_literal(member_id)),
+    )
+    if father is None or mother is None:
+        return None
+    return father + mother
+
+
+def deputy_ancestor_rows(member_id: int) -> Optional[List[Dict[str, Any]]]:
+    if query_deputy_class("father_up_edges", "SELECT 1 FROM father_up_edges LIMIT 1;") is None:
+        return None
+    result_ids: List[Tuple[int, int]] = []
+    queue: Deque[Tuple[int, int]] = deque([(member_id, 0)])
+    seen: Set[int] = {member_id}
+    while queue:
+        current_id, depth = queue.popleft()
+        edges = deputy_parent_edges(current_id)
+        if edges is None:
+            return None
+        for edge in edges:
+            parent_id = optional_row_int(edge, "to_member_id")
+            if parent_id and parent_id not in seen:
+                seen.add(parent_id)
+                result_ids.append((parent_id, depth + 1))
+                queue.append((parent_id, depth + 1))
+    details = deputy_member_details([item[0] for item in result_ids])
+    if details is None:
+        return None
+    depth_by_id = {member_id: depth for member_id, depth in result_ids}
+    return [merge_dict(row, {"generations_above": depth_by_id[int(row["member_id"])]}) for row in details]
+
+
+def deputy_great_grandchildren_rows(member_id: int) -> Optional[List[Dict[str, Any]]]:
+    generation_ids = [member_id]
+    for _ in range(3):
+        next_ids: List[int] = []
+        for current_id in generation_ids:
+            edges = deputy_child_edges(current_id)
+            if edges is None:
+                return None
+            next_ids.extend([optional_row_int(edge, "to_member_id") for edge in edges if optional_row_int(edge, "to_member_id")])
+        generation_ids = sorted(set(int(item) for item in next_ids))
+    details = deputy_member_details(generation_ids)
+    return sorted(details, key=lambda item: int(item["member_id"]))[:300] if details is not None else None
+
+
+def deputy_relationship_path(source_id: int, target_id: int) -> Optional[List[Dict[str, Any]]]:
+    if query_deputy_class("father_down_edges", "SELECT 1 FROM father_down_edges LIMIT 1;") is None:
+        return None
+    edge_queries = [
+        ("father_down_edges", "SELECT from_member_id,to_member_id FROM father_down_edges"),
+        ("mother_down_edges", "SELECT from_member_id,to_member_id FROM mother_down_edges"),
+        ("spouse_a_edges", "SELECT from_member_id,to_member_id FROM spouse_a_edges"),
+        ("spouse_b_edges", "SELECT from_member_id,to_member_id FROM spouse_b_edges"),
+    ]
+    graph: Dict[int, Set[int]] = {}
+    for class_name, sql in edge_queries:
+        rows = query_deputy_class(class_name, sql + ";")
+        if rows is None:
+            return None
+        for row in rows:
+            a = optional_row_int(row, "from_member_id")
+            b = optional_row_int(row, "to_member_id")
+            if a and b:
+                graph.setdefault(a, set()).add(b)
+                graph.setdefault(b, set()).add(a)
+    if source_id not in graph or target_id not in graph:
+        return []
+    queue: Deque[List[int]] = deque([[source_id]])
+    seen = {source_id}
+    while queue:
+        path = queue.popleft()
+        current = path[-1]
+        if current == target_id:
+            details = deputy_member_details(path)
+            return details if details is not None else None
+        for next_id in sorted(graph.get(current, set())):
+            if next_id not in seen:
+                seen.add(next_id)
+                queue.append(path + [next_id])
+    return []
 
 
 def member_rows_by_name(name: str) -> List[Dict[str, Any]]:
@@ -2556,17 +2749,74 @@ def tree(clan_id: int = 1, root_id: Optional[int] = None) -> Dict[str, Any]:
 
 @app.get("/api/members/{member_id}/ancestors")
 def ancestors(member_id: int) -> List[Dict[str, Any]]:
+    deputy_rows = deputy_ancestor_rows(member_id)
+    if deputy_rows is not None:
+        return deputy_rows
     return service.ancestors(member_id)
 
 
 @app.get("/api/members/{member_id}/relationship")
 def relationship(member_id: int, target_id: int = Query(..., gt=0)) -> Dict[str, Any]:
+    deputy_path = deputy_relationship_path(member_id, target_id)
+    if deputy_path is not None:
+        return {"path": deputy_path}
     return {"path": service.relationship_path(member_id, target_id)}
 
 
 @app.get("/api/query/spouse_children")
 def query_spouse_children(member_id: Optional[int] = None, name: Optional[str] = None) -> Dict[str, Any]:
     member_id = resolve_query_member_id(member_id, name)
+    member_rows = query_deputy_class(
+        "father_down_edges",
+        "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num,bio,id_pic "
+        "FROM members WHERE member_id = {} LIMIT 1;".format(sql_literal(member_id)),
+    )
+    spouse_a_rows = query_deputy_class(
+        "spouse_a_edges",
+        "SELECT m.member_id,m.clan_id,m.name,m.gender,m.birth_year,m.death_year,m.father_id,m.mother_id,m.generation_num,m.bio,m.id_pic,"
+        "se.marry_year,se.divorce_year "
+        "FROM spouse_a_edges AS se JOIN members AS m ON m.member_id = se.to_member_id "
+        "WHERE se.from_member_id = {} ORDER BY m.member_id;".format(sql_literal(member_id)),
+    )
+    spouse_b_rows = query_deputy_class(
+        "spouse_b_edges",
+        "SELECT m.member_id,m.clan_id,m.name,m.gender,m.birth_year,m.death_year,m.father_id,m.mother_id,m.generation_num,m.bio,m.id_pic,"
+        "se.marry_year,se.divorce_year "
+        "FROM spouse_b_edges AS se JOIN members AS m ON m.member_id = se.to_member_id "
+        "WHERE se.from_member_id = {} ORDER BY m.member_id;".format(sql_literal(member_id)),
+    )
+    father_child_rows = query_deputy_class(
+        "father_down_edges",
+        "SELECT m.member_id,m.clan_id,m.name,m.gender,m.birth_year,m.death_year,m.father_id,m.mother_id,m.generation_num,m.bio,m.id_pic,"
+        "'father' AS parent_role,'parent_child' AS edge_type "
+        "FROM father_down_edges AS edge JOIN members AS m ON m.member_id = edge.to_member_id "
+        "WHERE edge.from_member_id = {} ORDER BY m.birth_year,m.member_id;".format(sql_literal(member_id)),
+    )
+    mother_child_rows = query_deputy_class(
+        "mother_down_edges",
+        "SELECT m.member_id,m.clan_id,m.name,m.gender,m.birth_year,m.death_year,m.father_id,m.mother_id,m.generation_num,m.bio,m.id_pic,"
+        "'mother' AS parent_role,'parent_child' AS edge_type "
+        "FROM mother_down_edges AS edge JOIN members AS m ON m.member_id = edge.to_member_id "
+        "WHERE edge.from_member_id = {} ORDER BY m.birth_year,m.member_id;".format(sql_literal(member_id)),
+    )
+    if (
+        member_rows is not None
+        and spouse_a_rows is not None
+        and spouse_b_rows is not None
+        and father_child_rows is not None
+        and mother_child_rows is not None
+    ):
+        spouses_by_id = {}
+        for row in spouse_a_rows + spouse_b_rows:
+            spouses_by_id[int(row["member_id"])] = row
+        children_by_id = {}
+        for row in father_child_rows + mother_child_rows:
+            children_by_id[int(row["member_id"])] = row
+        return {
+            "member": member_rows[0] if member_rows else {},
+            "spouses": sorted(spouses_by_id.values(), key=lambda item: int(item["member_id"])),
+            "children": sorted(children_by_id.values(), key=lambda item: (optional_row_int(item, "birth_year") or 9999, int(item["member_id"]))),
+        }
     detail = service.member_detail(member_id)
     return {"member": detail["member"], "spouses": detail["spouses"], "children": detail["children"]}
 
@@ -2574,17 +2824,32 @@ def query_spouse_children(member_id: Optional[int] = None, name: Optional[str] =
 @app.get("/api/query/ancestors")
 def query_ancestors(member_id: Optional[int] = None, name: Optional[str] = None) -> List[Dict[str, Any]]:
     member_id = resolve_query_member_id(member_id, name)
+    deputy_rows = deputy_ancestor_rows(member_id)
+    if deputy_rows is not None:
+        return deputy_rows
     return service.ancestors(member_id)
 
 
 @app.get("/api/query/longevity")
 def query_longevity(clan_id: int = Query(..., gt=0)) -> List[Dict[str, Any]]:
     groups: Dict[int, List[int]] = {}
-    for row in all_member_rows(clan_id):
-        generation = optional_row_int(row, "generation_num")
-        age = row_age(row)
-        if generation is not None and age is not None:
-            groups.setdefault(generation, []).append(age)
+    deputy_rows = query_deputy_class(
+        "known_lifespan_members",
+        "SELECT generation_num,lifespan FROM known_lifespan_members "
+        "WHERE clan_id = {} AND generation_num IS NOT NULL;".format(sql_literal(clan_id)),
+    )
+    if deputy_rows is not None:
+        for row in deputy_rows:
+            generation = optional_row_int(row, "generation_num")
+            lifespan = optional_row_int(row, "lifespan")
+            if generation is not None and lifespan is not None:
+                groups.setdefault(generation, []).append(lifespan)
+    else:
+        for row in all_member_rows(clan_id):
+            generation = optional_row_int(row, "generation_num")
+            age = row_age(row)
+            if generation is not None and age is not None:
+                groups.setdefault(generation, []).append(age)
     result = []
     for generation, ages in groups.items():
         result.append({
@@ -2599,6 +2864,34 @@ def query_longevity(clan_id: int = Query(..., gt=0)) -> List[Dict[str, Any]]:
 def query_singles(clan_id: Optional[int] = None) -> List[Dict[str, Any]]:
     if clan_id == 0:
         clan_id = None
+    where = "WHERE clan_id = {}".format(sql_literal(clan_id)) if clan_id else ""
+    deputy_rows = query_deputy_class(
+        "male_50_plus",
+        "SELECT member_id,clan_id,name,gender,birth_year,death_year,generation_num,age "
+        "FROM male_50_plus {} ORDER BY clan_id,birth_year,member_id LIMIT 500;".format(where),
+    )
+    if deputy_rows is not None:
+        marriage_where = "WHERE clan_id = {}".format(sql_literal(clan_id)) if clan_id else ""
+        active_rows = query_deputy_class(
+            "active_marriages",
+            "SELECT spouse_a_id,spouse_b_id FROM active_marriages {};".format(marriage_where),
+        )
+        if active_rows is None:
+            active_rows = []
+        married_ids: Set[int] = set()
+        for marriage in active_rows:
+            spouse_a = optional_row_int(marriage, "spouse_a_id")
+            spouse_b = optional_row_int(marriage, "spouse_b_id")
+            if spouse_a:
+                married_ids.add(spouse_a)
+            if spouse_b:
+                married_ids.add(spouse_b)
+        result = []
+        for row in deputy_rows:
+            member_id = int(row["member_id"])
+            if member_id not in married_ids:
+                result.append(row)
+        return result[:200]
     rows = all_member_rows(clan_id)
     result = []
     for row in rows:
@@ -2654,6 +2947,9 @@ def query_early_birth(clan_id: Optional[int] = None) -> List[Dict[str, Any]]:
 @app.get("/api/query/great_grandchildren")
 def query_great_grandchildren(member_id: Optional[int] = None, name: Optional[str] = None) -> List[Dict[str, Any]]:
     member_id = resolve_query_member_id(member_id, name)
+    deputy_rows = deputy_great_grandchildren_rows(member_id)
+    if deputy_rows is not None:
+        return deputy_rows
     rows = all_member_rows()
     by_parent: Dict[int, List[Dict[str, Any]]] = {}
     for row in rows:

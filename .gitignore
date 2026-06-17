@@ -17,6 +17,10 @@ log/
 *.pid
 uvicorn.pid
 config/startup/startup.local.json
+config/startup/*.local.json
+config/startup/*.runtime.json
+config/startup/*.pid
+start-genealogy.local.bat
 
 # Generated data and database exports
 members_load.csv
@@ -29,6 +33,12 @@ backups/
 *_bck.sql
 *.dump
 *.backup
+*.bak
+*.tmp
+*.temp
+*.db
+*.sqlite
+*.sqlite3
 references/
 
 # Test and tooling caches
@@ -36,10 +46,13 @@ references/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
 _tmp_*.py
 tmp/
 temp/
+test.txt
+scratch/
 
 # Editor and OS files
 .vscode/

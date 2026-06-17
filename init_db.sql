@@ -1,13 +1,16 @@
 -- Totem genealogy database schema.
 -- Run with:
---   /usr/local/totem/bin/tsql -d genealogy -f init_db.sql
+--   /usr/local/totem/bin/tsql -U totem -p 55432 -d genealogy -f init_db.sql
+--
+-- Design:
+--   1. Relational business tables keep durable application data.
+--   2. objects/object_proxies keep a stable object identity layer.
+--   3. member_objects/marriage_objects are Totem CLASS objects.
+--   4. SELECTDEPUTYCLASS definitions expose relationship and role proxies.
+--
+-- Import scripts must copy members/marriages into member_objects/marriage_objects
+-- after bulk import so deputy classes can be queried by the application.
 
--- Object-proxy layer:
--- objects stores the stable identity of each business object.
--- object_proxies maps that identity to concrete business tables.
--- The application still reads and writes the concrete tables below, while the
--- object-proxy layer keeps the schema close to the object-agent design used by
--- the reference project.
 CREATE TABLE objects (
     object_id    BIGINT       PRIMARY KEY,
     object_type  VARCHAR(30)  NOT NULL,
@@ -95,14 +98,190 @@ CREATE TABLE member_photos (
     updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Member search indexes are managed by the app performance mode:
---   idx_members_clan, idx_members_clan_name, idx_members_father, idx_members_mother.
--- Normal mode drops them; performance mode creates them before measured search.
+-- Basic indexes for identity and permission checks. Search-performance indexes
+-- are still controlled by the application performance mode.
 CREATE INDEX idx_objects_type ON objects(object_type);
 CREATE INDEX idx_object_proxies_object ON object_proxies(object_id);
 CREATE INDEX idx_object_proxies_target ON object_proxies(proxy_table, proxy_pk);
 CREATE INDEX idx_collaborations_user ON collaborations(user_id);
 
+-- Totem object classes. SELECTDEPUTYCLASS must be based on CLASS objects, not
+-- ordinary CREATE TABLE tables.
+CREATE CLASS member_objects (
+    member_id BIGINT,
+    clan_id INTEGER,
+    name VARCHAR(50),
+    gender CHAR(1),
+    birth_year INTEGER,
+    death_year INTEGER,
+    father_id BIGINT,
+    mother_id BIGINT,
+    generation_num INTEGER
+);
+
+CREATE CLASS marriage_objects (
+    marriage_id INTEGER,
+    clan_id INTEGER,
+    spouse_a_id BIGINT,
+    spouse_b_id BIGINT,
+    marry_year INTEGER,
+    divorce_year INTEGER
+);
+
+-- Parent-child relationship proxies.
+CREATE SELECTDEPUTYCLASS father_down_edges
+AS (
+    SELECT
+        c.clan_id,
+        c.father_id AS from_member_id,
+        c.member_id AS to_member_id,
+        c.birth_year AS child_birth_year,
+        c.generation_num AS child_generation
+    FROM member_objects AS c
+    WHERE c.father_id IS NOT NULL
+);
+
+CREATE SELECTDEPUTYCLASS mother_down_edges
+AS (
+    SELECT
+        c.clan_id,
+        c.mother_id AS from_member_id,
+        c.member_id AS to_member_id,
+        c.birth_year AS child_birth_year,
+        c.generation_num AS child_generation
+    FROM member_objects AS c
+    WHERE c.mother_id IS NOT NULL
+);
+
+CREATE SELECTDEPUTYCLASS father_up_edges
+AS (
+    SELECT
+        c.clan_id,
+        c.member_id AS from_member_id,
+        c.father_id AS to_member_id,
+        c.generation_num AS child_generation
+    FROM member_objects AS c
+    WHERE c.father_id IS NOT NULL
+);
+
+CREATE SELECTDEPUTYCLASS mother_up_edges
+AS (
+    SELECT
+        c.clan_id,
+        c.member_id AS from_member_id,
+        c.mother_id AS to_member_id,
+        c.generation_num AS child_generation
+    FROM member_objects AS c
+    WHERE c.mother_id IS NOT NULL
+);
+
+-- Marriage relationship proxies.
+CREATE SELECTDEPUTYCLASS spouse_a_edges
+AS (
+    SELECT
+        marriage_id,
+        clan_id,
+        spouse_a_id AS from_member_id,
+        spouse_b_id AS to_member_id,
+        marry_year,
+        divorce_year
+    FROM marriage_objects
+    WHERE spouse_a_id IS NOT NULL
+      AND spouse_b_id IS NOT NULL
+);
+
+CREATE SELECTDEPUTYCLASS spouse_b_edges
+AS (
+    SELECT
+        marriage_id,
+        clan_id,
+        spouse_b_id AS from_member_id,
+        spouse_a_id AS to_member_id,
+        marry_year,
+        divorce_year
+    FROM marriage_objects
+    WHERE spouse_a_id IS NOT NULL
+      AND spouse_b_id IS NOT NULL
+);
+
+-- Role/statistic proxies. Aggregation is intentionally left to normal SQL or
+-- the service layer because Totem SELECTDEPUTYCLASS does not allow aggregates.
+CREATE SELECTDEPUTYCLASS male_50_plus
+AS (
+    SELECT
+        m.member_id,
+        m.clan_id,
+        m.name,
+        m.gender,
+        m.birth_year,
+        m.death_year,
+        m.generation_num,
+        (EXTRACT(YEAR FROM current_date) - m.birth_year) AS age
+    FROM member_objects AS m
+    WHERE m.gender = 'M'
+      AND m.birth_year IS NOT NULL
+      AND m.death_year IS NULL
+      AND (EXTRACT(YEAR FROM current_date) - m.birth_year) > 50
+);
+
+CREATE SELECTDEPUTYCLASS living_members
+AS (
+    SELECT
+        m.member_id,
+        m.clan_id,
+        m.name,
+        m.gender,
+        m.birth_year,
+        m.generation_num
+    FROM member_objects AS m
+    WHERE m.death_year IS NULL
+);
+
+CREATE SELECTDEPUTYCLASS known_lifespan_members
+AS (
+    SELECT
+        m.member_id,
+        m.clan_id,
+        m.name,
+        m.gender,
+        m.birth_year,
+        m.death_year,
+        m.generation_num,
+        (m.death_year - m.birth_year) AS lifespan
+    FROM member_objects AS m
+    WHERE m.birth_year IS NOT NULL
+      AND m.death_year IS NOT NULL
+);
+
+CREATE SELECTDEPUTYCLASS male_members
+AS (
+    SELECT member_id, clan_id, name, birth_year, death_year, generation_num
+    FROM member_objects
+    WHERE gender = 'M'
+);
+
+CREATE SELECTDEPUTYCLASS female_members
+AS (
+    SELECT member_id, clan_id, name, birth_year, death_year, generation_num
+    FROM member_objects
+    WHERE gender = 'F'
+);
+
+CREATE SELECTDEPUTYCLASS active_marriages
+AS (
+    SELECT marriage_id, clan_id, spouse_a_id, spouse_b_id, marry_year
+    FROM marriage_objects
+    WHERE divorce_year IS NULL
+);
+
+CREATE SELECTDEPUTYCLASS divorced_marriages
+AS (
+    SELECT marriage_id, clan_id, spouse_a_id, spouse_b_id, marry_year, divorce_year
+    FROM marriage_objects
+    WHERE divorce_year IS NOT NULL
+);
+
+-- Seed users. Both passwords are 123456, stored as pbkdf2_sha256 hashes.
 INSERT INTO objects (object_id, object_type, display_name)
 SELECT 1, 'user', 'admin'
 WHERE NOT EXISTS (SELECT 1 FROM objects WHERE object_id = 1);

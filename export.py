@@ -16,12 +16,23 @@ TOTEM_PORT = os.getenv("TOTEM_PORT", "")
 TOTEM_USER = os.getenv("TOTEM_USER", "totem")
 
 
-def sql_literal(value):
-    if value is None or value == "":
-        return "NULL"
-    if isinstance(value, int):
-        return str(value)
-    return "'{}'".format(str(value).replace("'", "''"))
+BASE_EXPORT_TABLES = ("users", "genealogies", "collaborations", "members", "marriages", "member_photos")
+OBJECT_SNAPSHOT_TABLES = ("objects", "object_proxies", "member_objects", "marriage_objects")
+DEPUTY_SNAPSHOT_TABLES = (
+    "father_down_edges",
+    "mother_down_edges",
+    "father_up_edges",
+    "mother_up_edges",
+    "spouse_a_edges",
+    "spouse_b_edges",
+    "male_50_plus",
+    "living_members",
+    "known_lifespan_members",
+    "male_members",
+    "female_members",
+    "active_marriages",
+    "divorced_marriages",
+)
 
 
 def run_tsql(args, timeout=300):
@@ -42,7 +53,7 @@ def run_tsql(args, timeout=300):
         timeout=timeout,
     )
     if completed.returncode != 0:
-        output = (completed.stderr.strip() or completed.stdout.strip() or "no output")
+        output = completed.stderr.strip() or completed.stdout.strip() or "no output"
         sql_hint = ""
         if "-c" in args:
             try:
@@ -99,13 +110,87 @@ def read_csv_dict(path):
         return list(csv.DictReader(handle))
 
 
-BASE_EXPORT_TABLES = ("users", "genealogies", "collaborations", "members", "marriages", "member_photos")
-OBJECT_EXPORT_TABLES = ("objects", "object_proxies")
+def table_available(table):
+    try:
+        run_tsql(["-c", "SELECT 1 FROM {} LIMIT 1;".format(table)], timeout=30)
+        return True
+    except Exception:
+        return False
+
+
+def execute(sql, timeout=300):
+    run_tsql(["-c", sql], timeout=timeout)
+
+
+def try_execute(sql, timeout=300):
+    try:
+        execute(sql, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def sync_deputy_objects():
+    if not table_available("member_objects") or not table_available("marriage_objects"):
+        return {"ok": False, "skipped": True, "reason": "Totem object classes are not available"}
+
+    execute("DELETE FROM marriage_objects;", timeout=300)
+    execute("DELETE FROM member_objects;", timeout=600)
+    execute(
+        "INSERT INTO member_objects(member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num) "
+        "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num "
+        "FROM members;",
+        timeout=900,
+    )
+    execute(
+        "INSERT INTO marriage_objects(marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year) "
+        "SELECT marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year "
+        "FROM marriages;",
+        timeout=600,
+    )
+    return {"ok": True, "skipped": False}
+
+
+def export_table_if_available(target, table_name, query):
+    if not table_available(table_name):
+        return None
+    try:
+        file_name = table_name + ".csv"
+        copy_to(query, target / file_name)
+        return file_name
+    except Exception:
+        return None
+
+
+def export_optional_snapshots(target, clan_filter=None):
+    files = []
+    for table_name in OBJECT_SNAPSHOT_TABLES:
+        if clan_filter and table_name in {"member_objects", "marriage_objects"}:
+            query = "SELECT * FROM {} WHERE clan_id IN ({}) ORDER BY 1".format(table_name, clan_filter)
+        else:
+            query = "SELECT * FROM {} ORDER BY 1".format(table_name)
+        file_name = export_table_if_available(target, table_name, query)
+        if file_name:
+            files.append(file_name)
+    return files
+
+
+def export_deputy_snapshots(target, clan_filter=None):
+    files = []
+    for table_name in DEPUTY_SNAPSHOT_TABLES:
+        if clan_filter:
+            query = "SELECT * FROM {} WHERE clan_id IN ({}) ORDER BY 1".format(table_name, clan_filter)
+        else:
+            query = "SELECT * FROM {} ORDER BY 1".format(table_name)
+        file_name = export_table_if_available(target, table_name, query)
+        if file_name:
+            files.append(file_name)
+    return files
 
 
 def write_import_bundle(target, manifest):
     tables = {}
-    for table_name in OBJECT_EXPORT_TABLES + BASE_EXPORT_TABLES:
+    for table_name in BASE_EXPORT_TABLES:
         csv_path = target / (table_name + ".csv")
         if csv_path.exists():
             tables[table_name] = read_csv_dict(csv_path)
@@ -118,6 +203,103 @@ def write_import_bundle(target, manifest):
     bundle_path = target / "import_bundle.json"
     bundle_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
     return bundle_path
+
+
+def timestamp():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def export_manifest(target, manifest):
+    write_import_bundle(target, manifest)
+    (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def export_database(output_dir=None):
+    target = Path(output_dir) if output_dir else EXPORT_DIR / ("database_" + timestamp())
+    target.mkdir(parents=True, exist_ok=True)
+
+    files = []
+    deputy_sync = sync_deputy_objects()
+    snapshot_files = export_optional_snapshots(target) + export_deputy_snapshots(target)
+    files.extend(snapshot_files)
+
+    copy_to("SELECT * FROM users ORDER BY id", target / "users.csv")
+    copy_to("SELECT * FROM genealogies ORDER BY clan_id", target / "genealogies.csv")
+    copy_to("SELECT * FROM collaborations ORDER BY clan_id,user_id", target / "collaborations.csv")
+    copy_to("SELECT * FROM members ORDER BY clan_id,generation_num,member_id", target / "members.csv")
+    copy_to("SELECT * FROM marriages ORDER BY clan_id,marriage_id", target / "marriages.csv")
+    files.extend(["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv"])
+    try:
+        copy_to("SELECT * FROM member_photos ORDER BY photo_sha256", target / "member_photos.csv")
+        files.append("member_photos.csv")
+    except Exception:
+        pass
+
+    manifest = {
+        "type": "database",
+        "database": DATABASE,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "files": files,
+        "base_tables": list(BASE_EXPORT_TABLES),
+        "snapshot_files": snapshot_files,
+        "import_file": "import_bundle.json",
+        "import_rebuilds": ["objects", "object_proxies", "member_objects", "marriage_objects", "select_deputy_classes"],
+        "deputy_sync": deputy_sync,
+    }
+    export_manifest(target, manifest)
+    return {"ok": True, "type": "database", "output_dir": str(target), "deputy_sync": deputy_sync}
+
+
+def export_clans(clan_ids, output_dir=None):
+    ids = [int(item) for item in clan_ids if str(item).strip()]
+    if not ids:
+        raise ValueError("至少需要选择一个族谱")
+    id_list = ",".join(str(item) for item in sorted(set(ids)))
+    target = Path(output_dir) if output_dir else EXPORT_DIR / ("clans_" + timestamp())
+    target.mkdir(parents=True, exist_ok=True)
+
+    files = []
+    deputy_sync = sync_deputy_objects()
+    snapshot_files = export_optional_snapshots(target, id_list) + export_deputy_snapshots(target, id_list)
+    files.extend(snapshot_files)
+
+    copy_to("SELECT * FROM genealogies WHERE clan_id IN ({}) ORDER BY clan_id".format(id_list), target / "genealogies.csv")
+    copy_to("SELECT * FROM collaborations WHERE clan_id IN ({}) ORDER BY clan_id,user_id".format(id_list), target / "collaborations.csv")
+    copy_to("SELECT * FROM members WHERE clan_id IN ({}) ORDER BY clan_id,generation_num,member_id".format(id_list), target / "members.csv")
+    copy_to("SELECT * FROM marriages WHERE clan_id IN ({}) ORDER BY clan_id,marriage_id".format(id_list), target / "marriages.csv")
+    files.extend(["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv"])
+    try:
+        copy_to(
+            "SELECT p.* FROM member_photos p JOIN members m ON m.id_pic = p.photo_sha256 "
+            "WHERE m.clan_id IN ({}) ORDER BY p.photo_sha256".format(id_list),
+            target / "member_photos.csv",
+        )
+        files.append("member_photos.csv")
+    except Exception:
+        pass
+    copy_to(
+        "SELECT DISTINCT u.* FROM users u "
+        "JOIN ("
+        "SELECT creator_id AS user_id FROM genealogies WHERE clan_id IN ({ids}) "
+        "UNION SELECT user_id FROM collaborations WHERE clan_id IN ({ids})"
+        ") r ON r.user_id = u.id ORDER BY u.id".format(ids=id_list),
+        target / "users.csv",
+    )
+
+    manifest = {
+        "type": "clans",
+        "database": DATABASE,
+        "clan_ids": sorted(set(ids)),
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "files": files,
+        "base_tables": list(BASE_EXPORT_TABLES),
+        "snapshot_files": snapshot_files,
+        "import_file": "import_bundle.json",
+        "import_rebuilds": ["objects", "object_proxies", "member_objects", "marriage_objects", "select_deputy_classes"],
+        "deputy_sync": deputy_sync,
+    }
+    export_manifest(target, manifest)
+    return {"ok": True, "type": "clans", "clan_ids": sorted(set(ids)), "output_dir": str(target), "deputy_sync": deputy_sync}
 
 
 def export_member_ancestors(member_id, path):
@@ -146,85 +328,6 @@ def export_member_ancestors(member_id, path):
                     seen.add(parent_id)
                     queue.append((parent_id, depth + 1))
     write_dict_rows(path, headers, result)
-
-
-def timestamp():
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def export_database(output_dir=None):
-    target = Path(output_dir) if output_dir else EXPORT_DIR / ("database_" + timestamp())
-    target.mkdir(parents=True, exist_ok=True)
-    files = []
-    try:
-        copy_to("SELECT * FROM objects ORDER BY object_id", target / "objects.csv")
-        copy_to("SELECT * FROM object_proxies ORDER BY proxy_id", target / "object_proxies.csv")
-        files.extend(["objects.csv", "object_proxies.csv"])
-    except Exception:
-        pass
-    copy_to("SELECT * FROM users ORDER BY id", target / "users.csv")
-    copy_to("SELECT * FROM genealogies ORDER BY clan_id", target / "genealogies.csv")
-    copy_to("SELECT * FROM collaborations ORDER BY clan_id,user_id", target / "collaborations.csv")
-    copy_to("SELECT * FROM members ORDER BY clan_id,generation_num,member_id", target / "members.csv")
-    copy_to("SELECT * FROM marriages ORDER BY clan_id,marriage_id", target / "marriages.csv")
-    files.extend(["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv"])
-    try:
-        copy_to("SELECT * FROM member_photos ORDER BY photo_sha256", target / "member_photos.csv")
-        files.append("member_photos.csv")
-    except Exception:
-        pass
-    manifest = {
-        "type": "database",
-        "database": DATABASE,
-        "exported_at": datetime.now().isoformat(timespec="seconds"),
-        "files": files,
-        "import_file": "import_bundle.json",
-    }
-    write_import_bundle(target, manifest)
-    (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True, "type": "database", "output_dir": str(target)}
-
-
-def export_clans(clan_ids, output_dir=None):
-    ids = [int(item) for item in clan_ids if str(item).strip()]
-    if not ids:
-        raise ValueError("至少需要选择一个族谱")
-    id_list = ",".join(str(item) for item in sorted(set(ids)))
-    target = Path(output_dir) if output_dir else EXPORT_DIR / ("clans_" + timestamp())
-    target.mkdir(parents=True, exist_ok=True)
-    copy_to("SELECT * FROM genealogies WHERE clan_id IN ({}) ORDER BY clan_id".format(id_list), target / "genealogies.csv")
-    copy_to("SELECT * FROM collaborations WHERE clan_id IN ({}) ORDER BY clan_id,user_id".format(id_list), target / "collaborations.csv")
-    copy_to("SELECT * FROM members WHERE clan_id IN ({}) ORDER BY clan_id,generation_num,member_id".format(id_list), target / "members.csv")
-    copy_to("SELECT * FROM marriages WHERE clan_id IN ({}) ORDER BY clan_id,marriage_id".format(id_list), target / "marriages.csv")
-    files = ["users.csv", "genealogies.csv", "collaborations.csv", "members.csv", "marriages.csv"]
-    try:
-        copy_to(
-            "SELECT p.* FROM member_photos p JOIN members m ON m.id_pic = p.photo_sha256 "
-            "WHERE m.clan_id IN ({}) ORDER BY p.photo_sha256".format(id_list),
-            target / "member_photos.csv",
-        )
-        files.append("member_photos.csv")
-    except Exception:
-        pass
-    copy_to(
-        "SELECT DISTINCT u.* FROM users u "
-        "JOIN ("
-        "SELECT creator_id AS user_id FROM genealogies WHERE clan_id IN ({ids}) "
-        "UNION SELECT user_id FROM collaborations WHERE clan_id IN ({ids})"
-        ") r ON r.user_id = u.id ORDER BY u.id".format(ids=id_list),
-        target / "users.csv",
-    )
-    manifest = {
-        "type": "clans",
-        "database": DATABASE,
-        "clan_ids": sorted(set(ids)),
-        "exported_at": datetime.now().isoformat(timespec="seconds"),
-        "files": files,
-        "import_file": "import_bundle.json",
-    }
-    write_import_bundle(target, manifest)
-    (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True, "type": "clans", "clan_ids": sorted(set(ids)), "output_dir": str(target)}
 
 
 def export_member(member_id, output_dir=None):

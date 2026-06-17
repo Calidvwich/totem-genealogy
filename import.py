@@ -266,6 +266,7 @@ def import_bundle(bundle_path, reset=False):
     for table in RESTORE_ORDER:
         inserted[table] = insert_rows(table, tables.get(table, []))
     object_layer = rebuild_object_proxies()
+    deputy_layer = sync_deputy_objects()
     return {
         "ok": True,
         "mode": "restore",
@@ -273,6 +274,7 @@ def import_bundle(bundle_path, reset=False):
         "manifest": bundle.get("manifest", {}),
         "inserted": inserted,
         "object_layer": object_layer,
+        "deputy_layer": deputy_layer,
     }
 
 
@@ -285,6 +287,8 @@ def ensure_generated_files(total=None):
 
 
 def reset_genealogy_data():
+    try_execute("DELETE FROM marriage_objects;")
+    try_execute("DELETE FROM member_objects;")
     try_execute("DELETE FROM object_proxies WHERE proxy_table IN ('genealogies','members','marriages');")
     try_execute("DELETE FROM objects WHERE object_type IN ('genealogy','member','marriage');")
     execute("DELETE FROM marriages;")
@@ -294,6 +298,8 @@ def reset_genealogy_data():
 
 
 def reset_all_data():
+    try_execute("DELETE FROM marriage_objects;")
+    try_execute("DELETE FROM member_objects;")
     try_execute("DELETE FROM object_proxies;")
     try_execute("DELETE FROM objects;")
     execute("DELETE FROM marriages;")
@@ -377,6 +383,27 @@ def rebuild_object_proxies():
     return {"ok": True, "skipped": False}
 
 
+def sync_deputy_objects():
+    if not table_available("member_objects") or not table_available("marriage_objects"):
+        return {"ok": False, "skipped": True, "reason": "Totem object classes are not available"}
+
+    execute("DELETE FROM marriage_objects;", timeout=300)
+    execute("DELETE FROM member_objects;", timeout=600)
+    execute(
+        "INSERT INTO member_objects(member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num) "
+        "SELECT member_id,clan_id,name,gender,birth_year,death_year,father_id,mother_id,generation_num "
+        "FROM members;",
+        timeout=900,
+    )
+    execute(
+        "INSERT INTO marriage_objects(marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year) "
+        "SELECT marriage_id,clan_id,spouse_a_id,spouse_b_id,marry_year,divorce_year "
+        "FROM marriages;",
+        timeout=600,
+    )
+    return {"ok": True, "skipped": False}
+
+
 def import_generated_data(total=None, reset=True, creator_user_id="admin"):
     ensure_generated_files(total)
     if reset:
@@ -402,12 +429,14 @@ def import_generated_data(total=None, reset=True, creator_user_id="admin"):
         "WHERE creator_id IS NOT NULL;"
     )
     object_layer = rebuild_object_proxies()
+    deputy_layer = sync_deputy_objects()
     return {
         "ok": True,
         "mode": "generated",
         "members_file": str(GENERATED_FILES["members"]),
         "marriages_file": str(GENERATED_FILES["marriages"]),
         "object_layer": object_layer,
+        "deputy_layer": deputy_layer,
     }
 
 
@@ -514,6 +543,7 @@ def import_clan_csv(csv_path, title, surname="", creator_user_id="admin"):
         next_marriage_id += 1
 
     object_layer = rebuild_object_proxies()
+    deputy_layer = sync_deputy_objects()
     return {
         "ok": True,
         "mode": "csv",
@@ -522,6 +552,7 @@ def import_clan_csv(csv_path, title, surname="", creator_user_id="admin"):
         "marriages": len(parent_pairs),
         "title": title,
         "object_layer": object_layer,
+        "deputy_layer": deputy_layer,
     }
 
 
